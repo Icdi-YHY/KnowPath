@@ -83,7 +83,9 @@ export function Sidebar({
               {n.title}
             </span>
           </div>
-          {kids.length && isOpen && renderTree(n.id, depth + 1)}
+          {/* 必须用 kids.length > 0：直接写 kids.length 时，无子节点会计算出 0，
+              React 会把数字 0 当作内容渲染出来（就是那个多余的「0」） */}
+          {kids.length > 0 && isOpen && renderTree(n.id, depth + 1)}
         </div>
       );
     });
