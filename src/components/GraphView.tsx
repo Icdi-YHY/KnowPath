@@ -44,11 +44,17 @@ function GraphInner() {
     };
   }, []);
 
+  const canvasRef = useRef<HTMLDivElement>(null);
+
   const fit = () => {
     if (!mountedRef.current) return;
-    fitView({ padding: 0.22, duration: 260, minZoom: 0.42, maxZoom: 1.05 });
+    // 画布还没量出尺寸时 fitView 会退化到最小倍率，把整张图缩成一小团，直接跳过
+    const el = canvasRef.current;
+    if (!el || el.clientWidth < 240 || el.clientHeight < 200) return;
+    fitView({ padding: 0.22, duration: 260, minZoom: 0.3, maxZoom: 1.05 });
   };
   const nodeKey = useMemo(() => nodes.map((n) => n.id).join(','), [nodes]);
+  const panelOpen = !!activeNodeId;
 
   // 挂载 / 节点集合变化后，等布局测量稳定再适配视口
   useEffect(() => {
@@ -57,6 +63,15 @@ function GraphInner() {
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeKey]);
+
+  // 详情面板展开/收起会改变画布宽度，重新适配一次，
+  // 否则刚新建的支线（排在父节点右侧，也就是最右边）会被挤出视野
+  useEffect(() => {
+    if (!nodes.length) return;
+    const t = setTimeout(fit, 200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panelOpen]);
 
   /** 主线显示序号（前序遍历），分叉后依然按阅读顺序连续编号 */
   const numbers = useMemo(() => mainlineNumbers(nodes), [nodes]);
@@ -141,7 +156,9 @@ function GraphInner() {
     <div className="flex h-full w-full flex-col">
       <MergePanel />
 
-      <div className="relative min-h-0 flex-1">
+      {/* 桌面端：详情面板占据真实宽度，不遮挡画布；移动端：仍是底部浮层 */}
+      <div className="flex min-h-0 flex-1">
+        <div ref={canvasRef} className="relative min-h-0 flex-1">
         <div className="absolute left-3 top-3 z-10 flex flex-wrap gap-1.5">
         <button className="btn-ghost !py-1.5 !text-xs" onClick={() => applyLayout()}>
           <LayoutGrid size={14} /> 自动排版
@@ -180,6 +197,7 @@ function GraphInner() {
           className="!bg-ink-850 !border-ink-700 [&>button]:!bg-ink-850 [&>button]:!border-ink-700 [&>button]:!text-ink-200 [&>button:hover]:!bg-ink-700"
         />
       </ReactFlow>
+        </div>
 
         {active && <NodeDetail nodeId={active.id} onClose={() => selectNode(null)} />}
       </div>
@@ -210,9 +228,12 @@ function NodeDetail({ nodeId, onClose }: { nodeId: string; onClose: () => void }
   return (
     <div
       className={clsx(
-        'absolute z-20 bottom-0 left-0 right-0 sm:bottom-auto sm:left-auto sm:top-0 sm:right-0 sm:h-full sm:w-[420px]',
+        // 移动端：从底部弹出的浮层
+        'absolute z-20 bottom-0 left-0 right-0 max-h-[62%]',
+        // 桌面端：改成占据真实宽度的右侧栏，避免盖住画布最右边那一列节点
+        'sm:static sm:z-auto sm:max-h-full sm:h-full sm:w-[420px] sm:shrink-0',
         'bg-ink-900/95 backdrop-blur border-ink-700 border-t sm:border-t-0 sm:border-l',
-        'max-h-[62%] sm:max-h-full flex flex-col animate-fade-in',
+        'flex flex-col animate-fade-in',
       )}
     >
       <div className="flex items-start gap-2 px-4 py-3 border-b border-ink-700/70">
