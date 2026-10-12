@@ -55,3 +55,13 @@ export async function getActiveKbId(): Promise<string | null> {
 export async function setActiveKbId(id: string | null): Promise<void> {
   await db.kv.put({ key: 'activeKbId', value: id });
 }
+
+/** 已从「线性主线」迁移到「树形脉络」的知识库 id 列表（只迁移一次） */
+export async function getTreeMigratedKbs(): Promise<string[]> {
+  const row = await db.kv.get('treeMigratedKbs');
+  return (row?.value as string[]) ?? [];
+}
+
+export async function setTreeMigratedKbs(ids: string[]): Promise<void> {
+  await db.kv.put({ key: 'treeMigratedKbs', value: ids });
+}

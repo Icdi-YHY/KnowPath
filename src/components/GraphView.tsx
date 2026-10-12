@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -35,7 +35,19 @@ function GraphInner() {
 
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState<Node<ThreadNodeData>>([]);
 
-  const fit = () => fitView({ padding: 0.22, duration: 260, minZoom: 0.42, maxZoom: 1.05 });
+  // 组件卸载后不能再碰 React Flow 实例，否则会访问已销毁的 DOM 而报错
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const fit = () => {
+    if (!mountedRef.current) return;
+    fitView({ padding: 0.22, duration: 260, minZoom: 0.42, maxZoom: 1.05 });
+  };
   const nodeKey = useMemo(() => nodes.map((n) => n.id).join(','), [nodes]);
 
   // 挂载 / 节点集合变化后，等布局测量稳定再适配视口
@@ -85,6 +97,9 @@ function GraphInner() {
       });
     }
     for (const c of crossLinks) {
+      // 关联线两端的节点必须都存在。否则 React Flow 会拿到指向不存在节点的边，
+      // 计算位置时抛 "Cannot read properties of null (reading 'getBoundingClientRect')"
+      if (!ids.has(c.sourceId) || !ids.has(c.targetId)) continue;
       out.push({
         id: `c-${c.id}`,
         source: c.sourceId,

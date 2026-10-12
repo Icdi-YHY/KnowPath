@@ -6,6 +6,8 @@ import {
   getSettings,
   saveSettings as dbSaveSettings,
   setActiveKbId as dbSetActiveKbId,
+  getTreeMigratedKbs,
+  setTreeMigratedKbs,
 } from '@/db/db';
 import {
   DEFAULT_SETTINGS,
@@ -138,6 +140,29 @@ function flattenMainline(
   return out;
 }
 
+/**
+ * 旧数据迁移：v0.1 的主线是「一条线性链」—— 所有主线节点的 parentId 都是 null，
+ * 靠全局 order 排序。新版是树形结构，若不迁移，这些节点会变成互不相连的散点。
+ *
+ * 判定条件：主线节点 ≥2 个，且**全部**都是根节点（没有任何层级）。
+ * 迁移方式：按 order 把它们依次串成一条链（第 1 个为根，其余挂在前面一个下面）。
+ */
+function migrateLinearMainline(nodes: ThreadNode[]): ThreadNode[] | null {
+  const mains = nodes.filter((n) => n.kind === 'main');
+  if (mains.length < 2) return null;
+  if (mains.some((n) => n.parentId)) return null; // 已经有层级，无需迁移
+
+  const ordered = mains.slice().sort((a, b) => a.order - b.order);
+  const parentOf = new Map<string, string>();
+  for (let i = 1; i < ordered.length; i++) parentOf.set(ordered[i].id, ordered[i - 1].id);
+
+  return nodes.map((n) => {
+    const parentId = parentOf.get(n.id);
+    if (parentId === undefined) return n;
+    return { ...n, parentId, order: 0, pinned: false };
+  });
+}
+
 /** 某个父节点下已有的主线子节点数量，用作新增节点的同级序号 */
 function siblingOrder(all: ThreadNode[], parentId: string | null): number {
   return all.filter((n) => n.kind === 'main' && (n.parentId ?? null) === parentId).length;
@@ -244,12 +269,26 @@ export const useStore = create<State>((set, get) => ({
   },
 
   setActiveKb: async (id, silent = false) => {
-    const [nodes, crossLinks, messages, pending] = await Promise.all([
+    const [loaded, crossLinks, messages, pending] = await Promise.all([
       db.nodes.where('kbId').equals(id).toArray(),
       db.crossLinks.where('kbId').equals(id).toArray(),
       db.messages.where('kbId').equals(id).toArray(),
       db.pendingMerges.where('kbId').equals(id).first(),
     ]);
+
+    // 每个知识库只做一次「线性主线 → 树形脉络」迁移
+    let nodes = loaded;
+    const migrated = await getTreeMigratedKbs();
+    if (!migrated.includes(id)) {
+      const next = migrateLinearMainline(nodes);
+      if (next) {
+        await db.nodes.bulkPut(next);
+        nodes = next;
+        console.info('[knowpath] 已把旧版线性主线迁移为树形脉络');
+      }
+      await setTreeMigratedKbs([...migrated, id]);
+    }
+
     const laid = mergeLayout(nodes);
     set({
       activeKbId: id,
@@ -288,10 +327,17 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
       ['HTTP 缓存机制', '掌握强缓存与协商缓存，知道何时会命中缓存'],
       ['同源策略与跨域 CORS', '理解浏览器的安全边界与跨域是怎么被允许的'],
     ];
-    const nodes: ThreadNode[] = items.map(([title, summary], i) => {
-      const n = makeNode(kbId, i, { title, summary });
+    // 示例数据也按树形生成：默认串成一条链（与旧版观感一致）
+    const nodes: ThreadNode[] = [];
+    items.forEach(([title, summary], i) => {
+      const n = makeNode(kbId, 0, {
+        title,
+        summary,
+        kind: 'main',
+        parentId: nodes[i - 1]?.id ?? null,
+      });
       n.content = `## ${title}\n\n这是「${summary}」的示例讲解占位内容。\n\n配置 AI 后点击节点右上角的 **重新生成** 即可让 AI 从零讲透这个知识点。\n\n- 要点一：先建立直觉类比\n- 要点二：再看精确定义\n- 要点三：最后动手验证\n\n> 自检：你能否用自己的话把它讲给一个完全不懂的人听？`;
-      return n;
+      nodes.push(n);
     });
     await db.nodes.bulkAdd(nodes);
     // 造一条示例支线
