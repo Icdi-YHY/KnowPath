@@ -135,17 +135,27 @@ export function branchUser(node: ThreadNode, question: string): string {
 
 /** 跨线关联分析：找出该支线与主线上其它知识点的联系 */
 export function crossLinkSystem(): string {
-  return `你是一个知识关联分析器。给定一条支线的内容，以及主线上所有知识点的标题与说明，判断这条支线与主线上的哪些知识点存在实质性的知识关联（例如：它是某知识点的前置、延伸、应用，或与某知识点概念互通）。
-只输出**一个 JSON 对象**（第一个字符是 {，最后一个是 }），不要代码围栏，不要解释文字。
-宁缺毋滥，只保留真正相关的（最多 3 个），没有就返回空数组。`;
+  return `你是一个知识关联分析器。给定一条支线的内容，以及主线上所有知识点的标题与说明，找出这条支线与主线上的哪些**其它**知识点存在实质性的知识关联。
+
+重点考虑这三类关联：
+- 概念互通：两者讲的是同一类东西的不同侧面
+- 前置依赖：不先理解对方，就很难理解这条支线
+- 实际应用：这条支线的知识被用在那里的场景中
+
+注意：
+- 支线已经挂在「它的归属知识点」下面了，**不要再关联归属知识点本身**（列表里已标注出来）。
+- 宁缺毋滥，只保留真正相关的（最多 3 个）。确实一个都没有，就返回空数组。
+
+只输出**一个 JSON 对象**（第一个字符是 {，最后一个是 }），不要代码围栏，不要解释文字。`;
 }
 
 export function crossLinkUser(
   source: { title: string; summary: string; content: string },
   mainline: ThreadNode[],
+  parentTitle?: string,
 ): string {
   const list = mainline
-    .map((n, i) => `${i}｜${n.title}｜${n.summary}`)
+    .map((n, i) => `${i}｜${n.title}｜${n.summary}${n.title === parentTitle ? '｜【该支线的归属知识点，无需关联】' : ''}`)
     .join('\n');
   return `支线内容：
 标题：${source.title}
@@ -158,7 +168,11 @@ ${list}
 请输出 JSON：
 {
   "links": [
-    { "index": 主线知识点的序号, "reason": "关联原因（20字以内）" }
+    {
+      "title": "关联到的知识点标题（必须与上面列表中的标题完全一致）",
+      "index": 该知识点的序号,
+      "reason": "关联原因（20字以内）"
+    }
   ]
 }`;
 }

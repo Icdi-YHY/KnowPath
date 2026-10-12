@@ -558,6 +558,14 @@ export function buildChatMessages(
   ];
 }
 
+/** 归一化标题，用于容错匹配：去掉空白、开头的序号和标点，统一小写 */
+function normTitle(s: string): string {
+  return s
+    .replace(/\s+/g, '')
+    .replace(/^[\d.、,，:：\-—]+/, '')
+    .toLowerCase();
+}
+
 /** 分析支线同主线的跨线关联 */
 export async function suggestCrossLinks(
   settings: Settings,
@@ -566,19 +574,60 @@ export async function suggestCrossLinks(
   signal?: AbortSignal,
 ): Promise<Omit<CrossLink, 'id' | 'kbId' | 'createdAt' | 'sourceId'>[]> {
   if (!mainline.length) return [];
-  const { value: json } = await completeJson<{ links?: { index: number; reason: string }[] }>(
+
+  // 归属知识点（支线挂靠的那个主线节点）已经有一条实线相连，不必再画虚线
+  const parentTitle = mainline.find((m) => m.id === node.parentId)?.title;
+
+  const { value: json } = await completeJson<{
+    links?: { index?: number; title?: string; reason?: string }[];
+  }>(
     settings,
     crossLinkSystem(),
-    crossLinkUser({ title: node.title, summary: node.summary, content: node.content }, mainline),
-    '请只输出 {"links":[{"index":数字,"reason":"原因"}]}，links 最多 3 项。',
+    crossLinkUser({ title: node.title, summary: node.summary, content: node.content }, mainline, parentTitle),
+    '请只输出 {"links":[{"index":数字,"title":"标题","reason":"原因"}]}，links 最多 3 项。',
     signal,
   );
-  const out: Omit<CrossLink, 'id' | 'kbId' | 'createdAt' | 'sourceId'>[] = [];
-  for (const l of json.links ?? []) {
-    const target = mainline[l.index];
-    if (target && target.id !== node.id) {
-      out.push({ targetId: target.id, reason: l.reason || '相关知识点' });
+
+  const byTitle = new Map<string, ThreadNode>();
+  for (const m of mainline) {
+    const k = normTitle(m.title);
+    if (k && !byTitle.has(k)) byTitle.set(k, m);
+  }
+
+  /**
+   * 定位模型指的知识点。
+   * 优先用标题匹配（比序号可靠得多：模型很容易数错或把序号当成 1 起），
+   * 标题对不上时再退回序号，并兼容模型返回 1 起的序号。
+   */
+  const resolve = (l: { index?: number; title?: string }): ThreadNode | undefined => {
+    if (typeof l.title === 'string' && l.title.trim()) {
+      const t = normTitle(l.title);
+      const exact = byTitle.get(t);
+      if (exact) return exact;
+      // 模型可能改写了标题 → 部分匹配，但只有唯一命中才采用，避免连错
+      if (t.length >= 2) {
+        const hits = mainline.filter((m) => {
+          const k = normTitle(m.title);
+          return k.length >= 2 && (k.includes(t) || t.includes(k));
+        });
+        if (hits.length === 1) return hits[0];
+      }
     }
+    if (typeof l.index === 'number' && Number.isFinite(l.index)) {
+      return mainline[l.index] ?? mainline[l.index - 1];
+    }
+    return undefined;
+  };
+
+  const out: Omit<CrossLink, 'id' | 'kbId' | 'createdAt' | 'sourceId'>[] = [];
+  const seen = new Set<string>();
+  for (const l of json.links ?? []) {
+    const target = resolve(l);
+    if (!target) continue;
+    if (target.id === node.parentId || target.id === node.id) continue;
+    if (seen.has(target.id)) continue;
+    seen.add(target.id);
+    out.push({ targetId: target.id, reason: l.reason || '相关知识点' });
   }
   return out.slice(0, 3);
 }

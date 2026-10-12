@@ -631,6 +631,7 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
 
       // 关联分析
       let links: CrossLink[] = [];
+      let linkMsg: string | null = null;
       try {
         // 必须用前序遍历（orderedMainline）而不是按 order 排序：
         // 树形结构下 order 只是「同级序号」，按它排会得到 [0,0,0,1,2…] 这种乱序，
@@ -646,8 +647,13 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
           createdAt: now(),
         }));
         if (links.length) await db.crossLinks.bulkAdd(links);
-      } catch {
-        /* 关联失败不影响支线生成 */
+        else linkMsg = '这条支线暂未发现与其它主线知识点的关联，因此没有虚线';
+      } catch (e) {
+        // 以前这里静默吞掉异常：AI 返回解析失败 / 网络错误时什么都不画，
+        // 用户只看到「没有虚线」，完全查不出原因
+        if ((e as Error).name === 'AbortError') throw e;
+        console.error('[knowpath] 跨线关联分析失败：', e);
+        linkMsg = `支线已生成，但跨线关联分析失败：${(e as Error).message}`;
       }
 
       const all = [...nodes, branch];
@@ -669,6 +675,7 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
         activeNodeId: branch.id,
         view: 'chat',
         busy: null,
+        notice: linkMsg,
       }));
     } catch (e) {
       if ((e as Error).name !== 'AbortError') set({ error: (e as Error).message });
