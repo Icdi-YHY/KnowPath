@@ -157,6 +157,26 @@ npx cap open android   # 在 Android Studio 中打包 APK
 - 全部数据存于本机 IndexedDB（知识库、节点、连线、对话记录）。
 - 「设置 → 数据」可把当前知识库导出为 `.knowpath.json`，在另一台设备的同一入口导入，实现跨设备迁移。
 
+## 回归测试
+
+项目自带一套端到端回归测试，用一个本地模拟 AI 服务把全部流程跑一遍（47 项断言），
+不需要真实 API Key，也不会产生任何费用。
+
+```bash
+npm i -D @playwright/cli          # 仅测试需要，未写进 package.json 以免拖累正常安装
+npm run build
+PORT=8081 npm run serve           # 终端 A
+npm run test:mock                 # 终端 B：模拟 AI 服务（127.0.0.1:4599）
+npm run test:e2e                  # 终端 C：跑测试，输出逐项结果
+```
+
+覆盖范围：生成主线 / 支线与跨线关联 / **重新生成主线时保留支线与连接线** /
+删除节点与子树 / 增量导入合并 / 沉浸对话 / 刷新后持久化 / 详情面板布局 /
+多知识库切换 / 窄屏布局 / 嵌套支线 / 学习状态切换 / 删除知识库。
+
+模拟服务支持切换关联分析的各种返回形态（正常 / 空结果 / 解析失败 / 只返回归属节点），
+用来验证分支逻辑；测试脚本会顺带收集浏览器控制台错误并在有错误时判定失败。
+
 ## 技术栈
 
 React 18 · TypeScript · Vite · Tailwind CSS · Zustand · Dexie(IndexedDB) · React Flow(@xyflow/react) · react-markdown
@@ -172,6 +192,9 @@ electron/
 scripts/
   serve.cjs         # 自建部署入口：托管 dist/，默认 0.0.0.0:8080
   gen-icons.mjs     # 离线生成 PWA 图标与 Windows .ico（无第三方依赖）
+tests/
+  mock-ai.cjs       # 本地模拟 OpenAI 兼容服务（无需真实 Key）
+  e2e.cjs           # 端到端回归测试
 src/
   components/      # UI：侧栏 / 知识库 / 图谱 / 对话 / 设置
   services/
