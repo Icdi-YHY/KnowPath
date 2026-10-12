@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   CrossLink,
   KnowledgeBase,
+  PendingMerge,
   Settings,
   ThreadNode,
 } from '@/types';
@@ -17,6 +18,7 @@ class KnowPathDB extends Dexie {
   nodes!: Table<ThreadNode, string>;
   crossLinks!: Table<CrossLink, string>;
   messages!: Table<ChatMessage, string>;
+  pendingMerges!: Table<PendingMerge, string>;
   kv!: Table<Kv, string>;
 
   constructor() {
@@ -27,6 +29,9 @@ class KnowPathDB extends Dexie {
       crossLinks: 'id, kbId, sourceId, targetId',
       messages: 'id, kbId, nodeId, createdAt',
       kv: 'key',
+    });
+    this.version(2).stores({
+      pendingMerges: 'id, kbId, createdAt',
     });
   }
 }

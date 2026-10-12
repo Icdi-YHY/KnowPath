@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { CornerDownLeft, Network, RefreshCw, Send, Sparkles, Square } from 'lucide-react';
+import { ChevronRight, CornerDownLeft, Network, RefreshCw, Send, Sparkles, Square } from 'lucide-react';
+import { mainlineNumbers, nodePath } from '@/services/layout';
 import { useStore } from '@/store/useStore';
 import { Markdown, Spinner } from './ui';
 
@@ -28,7 +29,9 @@ export function ChatView() {
   );
   const isStreaming = streaming?.nodeId === activeNodeId;
 
-  const mains = useMemo(() => nodes.filter((n) => n.kind === 'main').sort((a, b) => a.order - b.order), [nodes]);
+  const numbers = useMemo(() => mainlineNumbers(nodes), [nodes]);
+  /** 从根到当前节点的路径，替代原来的线性进度条 */
+  const path = useMemo(() => (activeNodeId ? nodePath(nodes, activeNodeId) : []), [nodes, activeNodeId]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -54,8 +57,6 @@ export function ChatView() {
     setInput('');
   };
 
-  const currentNodeIndex = mains.findIndex((m) => m.id === node.id);
-
   return (
     <div className="h-full flex flex-col">
       {/* 头部 */}
@@ -64,7 +65,9 @@ export function ChatView() {
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               {node.kind === 'main' ? (
-                <span className="chip bg-brand-500/15 text-brand-400">主线 {node.order + 1}</span>
+                <span className="chip bg-brand-500/15 text-brand-400">
+                  主线 {numbers.get(node.id) ?? node.order + 1}
+                </span>
               ) : (
                 <span className="chip bg-emerald-500/15 text-emerald-300">支线</span>
               )}
@@ -84,23 +87,24 @@ export function ChatView() {
           </button>
         </div>
 
-        {/* 主线进度条 */}
-        {mains.length > 0 && (
-          <div className="mt-3 flex items-center gap-1 overflow-x-auto pb-0.5">
-            {mains.map((m, i) => (
-              <button
-                key={m.id}
-                title={m.title}
-                onClick={() => selectNode(m.id)}
-                className={clsx(
-                  'shrink-0 h-1.5 rounded-full transition-all',
-                  m.id === node.id
-                    ? 'w-8 bg-brand-500'
-                    : currentNodeIndex >= 0 && i < currentNodeIndex
-                      ? 'w-4 bg-brand-600/60'
-                      : 'w-4 bg-ink-700 hover:bg-ink-600',
-                )}
-              />
+        {/* 所处脉络位置：从根节点到当前节点的路径（树形结构下比线性进度条更有意义） */}
+        {path.length > 1 && (
+          <div className="mt-2.5 flex flex-wrap items-center gap-x-0.5 gap-y-1 text-[11.5px] leading-5">
+            {path.map((p, i) => (
+              <span key={p.id} className="flex items-center gap-0.5">
+                {i > 0 && <ChevronRight size={11} className="shrink-0 text-ink-600" />}
+                <button
+                  onClick={() => selectNode(p.id)}
+                  title={p.title}
+                  className={clsx(
+                    'max-w-[150px] truncate rounded px-1 transition-colors',
+                    p.id === node.id ? 'font-medium text-brand-400' : 'text-ink-400 hover:text-white',
+                  )}
+                >
+                  {p.kind === 'main' ? `${numbers.get(p.id) ?? ''}. ` : '└ '}
+                  {p.title}
+                </button>
+              </span>
             ))}
           </div>
         )}

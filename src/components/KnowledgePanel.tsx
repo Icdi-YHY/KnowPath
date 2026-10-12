@@ -36,6 +36,7 @@ export function KnowledgePanel() {
   const generateMainline = useStore((s) => s.generateMainline);
   const busy = useStore((s) => s.busy);
   const setView = useStore((s) => s.setView);
+  const hasMainline = useStore((s) => s.nodes.some((n) => n.kind === 'main'));
 
   const kb = kbs.find((k) => k.id === activeKbId);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -58,6 +59,7 @@ export function KnowledgePanel() {
     }));
     setImports(items);
     setImporting(true);
+    const imported: string[] = [];
 
     // 图片 / 扫描件需要视觉模型；没配 Key 或模型不支持会给出明确提示
     const settings = useStore.getState().settings;
@@ -88,6 +90,7 @@ export function KnowledgePanel() {
           onProgress: (m) => patch({ message: m }),
         });
         await addDoc(file.name, text);
+        imported.push(file.name);
         patch({
           status: 'ok',
           message: warning ?? `已导入 ${text.length.toLocaleString()} 字`,
@@ -97,6 +100,12 @@ export function KnowledgePanel() {
       }
     }
     setImporting(false);
+
+    // 已有主线的知识库走「增量」：只分析关联与缺口，不自动重建主线
+    const store = useStore.getState();
+    if (imported.length && store.nodes.some((n) => n.kind === 'main')) {
+      await store.analyzeNewDocs(imported);
+    }
   };
 
   if (!kb) {
@@ -168,9 +177,15 @@ export function KnowledgePanel() {
               className="btn-primary"
               disabled={!content.trim()}
               onClick={async () => {
-                await addDoc(name.trim() || `材料 ${kb.docs.length + 1}`, content.trim());
+                const docName = name.trim() || `材料 ${kb.docs.length + 1}`;
+                await addDoc(docName, content.trim());
                 setName('');
                 setContent('');
+                // 已有主线时同样走增量分析（粘贴和上传行为保持一致）
+                const store = useStore.getState();
+                if (store.nodes.some((n) => n.kind === 'main')) {
+                  await store.analyzeNewDocs([docName]);
+                }
               }}
             >
               添加
@@ -325,17 +340,23 @@ export function KnowledgePanel() {
         <div className="sticky bottom-0 mt-6 py-4 bg-gradient-to-t from-ink-950 via-ink-950/90 to-transparent">
           <button
             className="btn-primary w-full !py-3"
-            disabled={!kb.docs.length || busy === 'mainline'}
+            disabled={!kb.docs.length || busy === 'mainline' || busy === 'merge'}
             onClick={async () => {
               await generateMainline();
               setView('graph');
             }}
           >
             {busy === 'mainline' ? <Spinner /> : <Wand2 size={17} />}
-            {busy === 'mainline' ? 'AI 正在通读材料并规划主线…' : '让 AI 基于全部材料生成学习主线'}
+            {busy === 'mainline'
+              ? 'AI 正在通读材料并规划脉络…'
+              : hasMainline
+                ? '重新规划主线脉络'
+                : '让 AI 基于全部材料生成学习主线'}
           </button>
           <div className="text-[11px] text-ink-500 text-center mt-2">
-            会先删除当前知识库中已有的主线与支线，重新规划
+            {hasMainline
+              ? '⚠️ 会清空现有主线脉络与支线。只是新增了材料的话，直接导入即可 —— 会自动做增量关联，不用重建'
+              : '会为全部材料规划一条从零到掌握的脉络；单链推进，需要发散的地方自动分叉'}
           </div>
         </div>
       </div>

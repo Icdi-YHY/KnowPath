@@ -14,7 +14,9 @@ import {
 } from '@xyflow/react';
 import clsx from 'clsx';
 import { LayoutGrid, Maximize2, MessageSquare, RefreshCw, Sparkles, Trash2, Wand2, X } from 'lucide-react';
+import { mainlineNumbers } from '@/services/layout';
 import { useStore } from '@/store/useStore';
+import { MergePanel } from './MergePanel';
 import { NodeCard, type ThreadNodeData } from './NodeCard';
 import { EmptyState, Markdown, Spinner, StatusDot } from './ui';
 
@@ -44,15 +46,18 @@ function GraphInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeKey]);
 
+  /** 主线显示序号（前序遍历），分叉后依然按阅读顺序连续编号 */
+  const numbers = useMemo(() => mainlineNumbers(nodes), [nodes]);
+
   const rfNodes = useMemo<Node<ThreadNodeData>[]>(
     () =>
       nodes.map((n) => ({
         id: n.id,
         type: 'thread',
         position: { x: n.x, y: n.y },
-        data: { node: n, active: n.id === activeNodeId },
+        data: { node: n, active: n.id === activeNodeId, index: numbers.get(n.id) },
       })),
-    [nodes, activeNodeId],
+    [nodes, activeNodeId, numbers],
   );
 
   useEffect(() => {
@@ -61,31 +66,22 @@ function GraphInner() {
 
   const edges = useMemo<Edge[]>(() => {
     const out: Edge[] = [];
-    const mains = nodes.filter((n) => n.kind === 'main').sort((a, b) => a.order - b.order);
-    mains.forEach((m, i) => {
-      const next = mains[i + 1];
-      if (!next) return;
-      out.push({
-        id: `m-${m.id}-${next.id}`,
-        source: m.id,
-        target: next.id,
-        sourceHandle: 'r',
-        targetHandle: 'l',
-        type: 'smoothstep',
-        style: { stroke: '#5b8cff', strokeWidth: 2.5 },
-        animated: false,
-      });
-    });
+    const ids = new Set(nodes.map((n) => n.id));
+
+    // 结构线：统一是「父 → 子」。主线之间的连线是蓝色脉络，挂到支线的是灰色
     for (const n of nodes) {
-      if (!n.parentId) continue;
+      if (!n.parentId || !ids.has(n.parentId)) continue;
+      const isMainline = n.kind === 'main';
       out.push({
         id: `p-${n.parentId}-${n.id}`,
         source: n.parentId,
         target: n.id,
-        sourceHandle: 'b',
-        targetHandle: 't',
+        sourceHandle: 'r',
+        targetHandle: 'l',
         type: 'smoothstep',
-        style: { stroke: '#3a4a68', strokeWidth: 2 },
+        style: isMainline
+          ? { stroke: '#5b8cff', strokeWidth: 2.5 }
+          : { stroke: '#22d3a6', strokeWidth: 2, opacity: 0.65 },
       });
     }
     for (const c of crossLinks) {
@@ -127,8 +123,11 @@ function GraphInner() {
   }
 
   return (
-    <div className="relative h-full w-full">
-      <div className="absolute left-3 top-3 z-10 flex flex-wrap gap-1.5">
+    <div className="flex h-full w-full flex-col">
+      <MergePanel />
+
+      <div className="relative min-h-0 flex-1">
+        <div className="absolute left-3 top-3 z-10 flex flex-wrap gap-1.5">
         <button className="btn-ghost !py-1.5 !text-xs" onClick={() => applyLayout()}>
           <LayoutGrid size={14} /> 自动排版
         </button>
@@ -167,7 +166,8 @@ function GraphInner() {
         />
       </ReactFlow>
 
-      {active && <NodeDetail nodeId={active.id} onClose={() => selectNode(null)} />}
+        {active && <NodeDetail nodeId={active.id} onClose={() => selectNode(null)} />}
+      </div>
     </div>
   );
 }
@@ -185,6 +185,7 @@ function NodeDetail({ nodeId, onClose }: { nodeId: string; onClose: () => void }
   const selectNode = useStore((s) => s.selectNode);
   const [question, setQuestion] = useState('');
   const [showBranch, setShowBranch] = useState(false);
+  const numbers = useMemo(() => mainlineNumbers(nodes), [nodes]);
 
   if (!node) return null;
   const isStreaming = streaming?.nodeId === nodeId && streaming.kind === 'explain';
@@ -203,19 +204,25 @@ function NodeDetail({ nodeId, onClose }: { nodeId: string; onClose: () => void }
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
             {isMain ? (
-              <span className="chip bg-brand-500/15 text-brand-400">主线 {node.order + 1}</span>
-            ) : (
+              <span className="chip bg-brand-500/15 text-brand-400">
+                主线 {numbers.get(nodeId) ?? node.order + 1}
+              </span>
+            ) : node.kind === 'branch' ? (
               <span className="chip bg-emerald-500/15 text-emerald-300">支线</span>
+            ) : (
+              <span className="chip bg-amber-500/15 text-amber-300">资料</span>
             )}
-            <button
-              className="chip bg-ink-800 text-ink-300 hover:text-white"
-              onClick={() =>
-                setNodeStatus(nodeId, node.status === 'done' ? 'todo' : node.status === 'todo' ? 'learning' : 'done')
-              }
-            >
-              <StatusDot status={node.status} />
-              {node.status === 'done' ? '已完成' : node.status === 'learning' ? '学习中' : '未开始'}
-            </button>
+            {node.kind !== 'source' && (
+              <button
+                className="chip bg-ink-800 text-ink-300 hover:text-white"
+                onClick={() =>
+                  setNodeStatus(nodeId, node.status === 'done' ? 'todo' : node.status === 'todo' ? 'learning' : 'done')
+                }
+              >
+                <StatusDot status={node.status} />
+                {node.status === 'done' ? '已完成' : node.status === 'learning' ? '学习中' : '未开始'}
+              </button>
+            )}
           </div>
           <div className="font-semibold text-white leading-snug">{node.title}</div>
           {node.summary && <div className="text-xs text-ink-400 mt-1">{node.summary}</div>}

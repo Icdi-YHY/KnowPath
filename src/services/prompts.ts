@@ -29,12 +29,17 @@ const TUTOR_PERSONA = `你是一位极其擅长「从零讲清楚」的私人导
 export function mainlineSystem(): string {
   return `${TUTOR_PERSONA}
 
-你的任务：阅读用户提供的全部知识材料，为学生设计一条「从零到掌握」的**主线学习路径**。
-要求：
-- 主线是有严格先后顺序的知识点序列，后一个要建立在前一个之上，前面的知识点是后面的前置。
-- 第一个知识点必须是最基础、最没有门槛的入门概念；最后一个覆盖材料中最深入的内容。
-- 数量控制在 8~12 个之间，颗粒度适中（每个知识点 1~2 小时可学完）。
-- 优先覆盖材料的核心脉络，不要罗列琐碎细节。
+你的任务：阅读用户提供的全部知识材料，为学生设计一条「从零到掌握」的**主线学习脉络**。
+
+关于结构（很重要）：
+- 这是一棵**树**，不是一条死板的直线。每个知识点通过 children 挂载它的后续知识点。
+- 绝大多数知识点只有 **1 个** children，这样呈现出来就是一条自然推进的直线。
+- 只有当材料里确实存在「先学完某个基础后，需要往几个**并列方向**分别展开」时，
+  才给这个知识点挂 2~3 个 children 形成分叉。
+- 分叉要克制：整棵脉络的分叉点不超过 2~3 处。**不要为了分叉而分叉**。
+- 每个知识点都必须是它 children 的前置；同级 children 之间是并列关系。
+- 第一个（数组第一个）必须是最基础、最没有门槛的入门概念。
+- 知识点总数（含所有层级）控制在 8~14 个之间。
 
 【输出格式（极其重要）】
 - 只输出**一个 JSON 对象**，第一个字符必须是 {，最后一个字符必须是 }。
@@ -46,18 +51,28 @@ export function mainlineUser(kb: KnowledgeBase, maxChars: number): string {
   return `以下是我的知识材料：
 ${buildKbContext(kb, maxChars)}
 
-请输出 JSON，格式严格如下（数组按学习顺序排列）：
+请输出 JSON，结构严格如下（children 可以继续嵌套，没有后续知识点则为空数组）：
 {
-  "title": "这条主线的一句话主题（不超过20字）",
+  "title": "整条脉络的一句话主题（不超过20字）",
   "nodes": [
     {
       "title": "知识点标题（不超过16字）",
-      "summary": "一句话说明这个知识点要解决什么、学完能得到什么（40字以内）",
-      "prerequisites": ["前置知识点的标题，没有则空数组"],
-      "content": "该知识点的完整讲解（Markdown，200~400字，从零讲起，含例子）"
+      "summary": "一句话说明这个知识点要解决什么（40字以内）",
+      "content": "该知识点的讲解（Markdown，200~400字，从零讲起，含例子）",
+      "children": [
+        {
+          "title": "后续知识点",
+          "summary": "……",
+          "content": "……",
+          "children": []
+        }
+      ]
     }
   ]
-}`;
+}
+
+注意：大多数节点的 children 只有一个元素（保持线性推进）；
+只有当确实需要往并列方向展开时，才让某个节点的 children 有 2~3 个元素。`;
 }
 
 /** 知识点讲解的系统提示（只要导师人设，材料走 user 消息） */
@@ -146,4 +161,78 @@ ${list}
     { "index": 主线知识点的序号, "reason": "关联原因（20字以内）" }
   ]
 }`;
+}
+
+/* ------------------------- 增量合并（新增材料） ------------------------- */
+
+/**
+ * 把主线节点整理成带层级缩进的编号清单。
+ * 编号与前序遍历一致，和界面上看到的序号完全对应。
+ */
+export function numberedMainline(mainline: ThreadNode[]): string {
+  const byId = new Map(mainline.map((n) => [n.id, n]));
+  return mainline
+    .map((n, index) => {
+      // 计算层级缩进
+      let depth = 0;
+      let cur = n.parentId ? byId.get(n.parentId) : undefined;
+      const guard = new Set<string>();
+      while (cur && !guard.has(cur.id)) {
+        guard.add(cur.id);
+        depth += 1;
+        cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+      }
+      const indent = depth > 0 ? `${'　'.repeat(depth)}└ ` : '';
+      return `${index}｜${indent}${n.title}｜${n.summary}`;
+    })
+    .join('\n');
+}
+
+export function mergeSystem(): string {
+  return `你是一位知识脉络整合助手。
+
+用户的学习资料库**已经有一条主线脉络**，现在**新增了一批材料**。
+你的任务不是重建主线，而是判断这批新材料该如何归位：
+
+1. 【关联】新材料与已有主线上的哪些知识点实质相关？最多挑 4 个，按相关度排序。
+   判断标准：讲的是同一个主题、或互为前置/延伸/应用。宁缺毋滥，不相关就不要写。
+2. 【新增】新材料里有没有**现有主线完全没覆盖的重要内容**？
+   如果有，建议新增为知识点，并指明挂在哪个已有知识点下面（parentIndex）。
+   最多 3 个。如果新材料只是已有内容的补充说明，就返回空数组 —— **不要硬凑**。
+
+只输出**一个 JSON 对象**（第一个字符是 {，最后一个是 }），
+不要任何解释文字，不要 Markdown 代码围栏，必须完整闭合。`;
+}
+
+export function mergeUser(
+  docNames: string[],
+  newDocsText: string,
+  mainline: ThreadNode[],
+): string {
+  return `【现有主线脉络】（编号｜标题｜说明，缩进表示层级）：
+${numberedMainline(mainline) || '（暂无）'}
+
+【本次新增材料】
+${newDocsText.slice(0, 6000)}
+
+请输出 JSON：
+{
+  "source": {
+    "title": "给这批材料的总称（不超过16字）",
+    "summary": "一句话概括这批材料讲了什么（50字以内）"
+  },
+  "links": [
+    { "index": 相关的主线知识点编号, "reason": "关联原因（20字以内）" }
+  ],
+  "newNodes": [
+    {
+      "title": "建议新增的知识点标题（不超过16字）",
+      "summary": "一句话说明（40字以内）",
+      "parentIndex": 挂到哪个已有知识点下面（用上面的编号；若是全新方向则填 null）,
+      "content": "该知识点的讲解（Markdown，200~400字）"
+    }
+  ]
+}
+
+注意：links 和 newNodes 都可以是空数组，但必须给出 source 字段。`;
 }

@@ -15,6 +15,8 @@ import {
   explainUser,
   mainlineSystem,
   mainlineUser,
+  mergeSystem,
+  mergeUser,
 } from './prompts';
 
 export class AIError extends Error {
@@ -413,67 +415,89 @@ async function completeJson<T>(
 /** 主线至少要有这么多个知识点，否则视为「被截断/退化」 */
 const MIN_MAINLINE_NODES = 4;
 
+/** 还没有分配 id 的主线节点草稿（树形） */
+export interface MainlineDraftNode {
+  title: string;
+  summary: string;
+  content: string;
+  children: MainlineDraftNode[];
+}
+
 export interface MainlineResult {
   title: string;
   /** 非致命的问题提示（例如输出被截断、自动重试过） */
   warning?: string;
-  nodes: {
-    parentId: null;
-    kind: 'main';
-    title: string;
-    summary: string;
-    content: string;
-    status: 'todo';
-  }[];
+  nodes: MainlineDraftNode[];
 }
 
-/** 生成主线：知识点序列 */
+interface RawNode {
+  title?: string;
+  summary?: string;
+  content?: string;
+  children?: RawNode[];
+}
+
+/** 递归统计知识点总数 */
+function countNodes(list: RawNode[]): number {
+  return list.reduce((sum, n) => sum + 1 + countNodes(Array.isArray(n?.children) ? n.children : []), 0);
+}
+
+/** 清理并递归标准化树结构 */
+function normalizeTree(list: RawNode[]): MainlineDraftNode[] {
+  const out: MainlineDraftNode[] = [];
+  for (const n of list) {
+    if (!n || typeof n.title !== 'string' || !n.title.trim()) continue;
+    out.push({
+      title: n.title.trim(),
+      summary: (n.summary ?? '').trim(),
+      content: (n.content ?? '').trim(),
+      children: normalizeTree(Array.isArray(n.children) ? n.children : []),
+    });
+  }
+  return out;
+}
+
+/** 生成主线脉络（树形：单子节点成线，多子节点分叉） */
 export async function generateMainline(
   settings: Settings,
   kb: KnowledgeBase,
   signal?: AbortSignal,
 ): Promise<MainlineResult> {
-  const { value: parsed, warning } = await completeJson<{
-    title?: string;
-    nodes?: { title?: string; summary?: string; content?: string }[];
-  }>(
+  const { value: parsed, warning } = await completeJson<
+    { title?: string; nodes?: RawNode[] } | RawNode[]
+  >(
     settings,
     mainlineSystem(),
     mainlineUser(kb, settings.contextChars),
-    '请更精简并确保 JSON 完整闭合：知识点 8~12 个，每个 content 不超过 200 字。' +
+    '请更精简并确保 JSON 完整闭合：知识点总数 8~14 个，每个 content 不超过 200 字。' +
       '如果担心写不下，可以**直接省略 content 字段**，只保留 title 和 summary —— 之后我会逐个补充讲解。',
     signal,
     (v) => {
-      const list = Array.isArray(v) ? v : (v as { nodes?: unknown[] })?.nodes ?? [];
-      return list.length >= MIN_MAINLINE_NODES
+      const list = Array.isArray(v) ? v : v.nodes ?? [];
+      const total = countNodes(list);
+      return total >= MIN_MAINLINE_NODES
         ? null
-        : `只生成了 ${list.length} 个知识点，远少于要求的 8~12 个`;
+        : `只生成了 ${total} 个知识点，远少于要求的 8~14 个`;
     },
   );
 
-  // 容错：模型直接返回数组的情况
-  const rawNodes = Array.isArray(parsed) ? parsed : parsed?.nodes ?? [];
-  const nodes = rawNodes.filter((n) => n && typeof n.title === 'string' && n.title.trim());
+  const rawNodes = Array.isArray(parsed) ? parsed : parsed.nodes ?? [];
+  const nodes = normalizeTree(rawNodes);
+  const total = countNodes(rawNodes);
+
   if (!nodes.length) {
     console.error('[knowpath] 主线 JSON 结构不符合预期：\n', JSON.stringify(parsed).slice(0, 500));
     throw new AIError('AI 返回的 JSON 里没有找到有效的知识点列表，可重试一次或换用更强的模型。');
   }
 
   return {
-    title: (!Array.isArray(parsed) && parsed?.title) || `${kb.name} · 学习主线`,
+    title: (!Array.isArray(parsed) && parsed.title) || `${kb.name} · 学习主线`,
     warning:
       warning ??
-      (nodes.length < MIN_MAINLINE_NODES
-        ? `只生成了 ${nodes.length} 个知识点，建议点「重新生成主线」再试一次`
+      (total < MIN_MAINLINE_NODES
+        ? `只生成了 ${total} 个知识点，建议点「重新生成主线」再试一次`
         : undefined),
-    nodes: nodes.map((n) => ({
-      parentId: null,
-      kind: 'main',
-      title: n.title!.trim(),
-      summary: (n.summary ?? '').trim(),
-      content: (n.content ?? '').trim(),
-      status: 'todo',
-    })),
+    nodes,
   };
 }
 
@@ -557,6 +581,75 @@ export async function suggestCrossLinks(
     }
   }
   return out.slice(0, 3);
+}
+
+export interface MergeAnalysis {
+  /** 建议创建的资料节点 */
+  source: { title: string; summary: string };
+  /** 与哪些已有知识点相关 */
+  links: { nodeId: string; reason: string }[];
+  /** 建议新增的知识点 */
+  newNodes: { title: string; summary: string; content: string; parentId: string | null }[];
+}
+
+/**
+ * 增量分析：判断新导入的材料与已有主线的关联，以及建议新增的知识点。
+ * 只做分析、不碰任何数据，等用户点「合并」才应用。
+ *
+ * @param mainline 已按前序遍历排好序的主线节点（序号与界面显示一致）
+ */
+export async function analyzeMerge(
+  settings: Settings,
+  docNames: string[],
+  newDocsText: string,
+  mainline: ThreadNode[],
+  signal?: AbortSignal,
+): Promise<MergeAnalysis> {
+  const { value } = await completeJson<{
+    source?: { title?: string; summary?: string };
+    links?: { index: number; reason?: string }[];
+    newNodes?: {
+      title?: string;
+      summary?: string;
+      content?: string;
+      parentIndex?: number | null;
+    }[];
+  }>(
+    settings,
+    mergeSystem(),
+    mergeUser(docNames, newDocsText, mainline),
+    '请只输出一个 JSON 对象，字段为 source / links / newNodes，必须完整闭合。',
+    signal,
+  );
+
+  const links: MergeAnalysis['links'] = [];
+  for (const l of value.links ?? []) {
+    const target = mainline[l.index];
+    if (target && !links.some((x) => x.nodeId === target.id)) {
+      links.push({ nodeId: target.id, reason: (l.reason ?? '').trim() || '相关内容' });
+    }
+  }
+
+  const newNodes: MergeAnalysis['newNodes'] = [];
+  for (const n of value.newNodes ?? []) {
+    if (!n || typeof n.title !== 'string' || !n.title.trim()) continue;
+    const parent = n.parentIndex == null ? null : mainline[n.parentIndex] ?? null;
+    newNodes.push({
+      title: n.title.trim(),
+      summary: (n.summary ?? '').trim(),
+      content: (n.content ?? '').trim(),
+      parentId: parent ? parent.id : null,
+    });
+  }
+
+  return {
+    source: {
+      title: value.source?.title?.trim() || docNames[0] || '新导入的材料',
+      summary: value.source?.summary?.trim() || `本次导入 ${docNames.length} 份材料`,
+    },
+    links,
+    newNodes,
+  };
 }
 
 /**

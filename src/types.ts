@@ -1,6 +1,12 @@
 /** 全局数据模型 */
 
-export type NodeKind = 'main' | 'branch';
+/**
+ * 节点类型：
+ * - main   主线知识点（互相构成树形脉络）
+ * - branch 支线（针对某个疑问展开，可无限嵌套）
+ * - source 资料节点（一份导入的材料，虚线关联到它支撑的知识点）
+ */
+export type NodeKind = 'main' | 'branch' | 'source';
 export type NodeStatus = 'todo' | 'learning' | 'done';
 
 /** 知识库中的一篇文档（来自文件或粘贴） */
@@ -54,6 +60,30 @@ export interface CrossLink {
   sourceId: string;
   targetId: string;
   reason: string;
+  createdAt: number;
+}
+
+/**
+ * 待确认的增量合并：往已有主线的知识库导入新文件后产生。
+ * 不会自动改动主线，等用户点「合并」才应用。
+ */
+export interface PendingMerge {
+  id: string;
+  kbId: string;
+  /** 本次新增的材料文件名 */
+  docNames: string[];
+  /** 建议创建的资料节点 */
+  source: { title: string; summary: string };
+  /** 建议关联的已有知识点 */
+  links: { nodeId: string; title: string; reason: string }[];
+  /** 建议新增的知识点 */
+  newNodes: {
+    title: string;
+    summary: string;
+    content: string;
+    parentId: string | null;
+    parentTitle: string | null;
+  }[];
   createdAt: number;
 }
 

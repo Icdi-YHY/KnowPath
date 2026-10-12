@@ -2,83 +2,101 @@ import type { ThreadNode } from '@/types';
 
 export const NODE_W = 208;
 export const NODE_H = 96;
-export const LEVEL_H = 210;
-export const SIBLING_GAP = 34;
-export const MAIN_GAP = 130;
+/** 相邻层级之间的水平间距 */
+export const LEVEL_GAP = 64;
+/** 同级节点之间的垂直间距 */
+export const SIBLING_GAP = 22;
+/** 多个根节点之间的垂直间距 */
+export const ROOT_GAP = 60;
+
+/** 同级节点的排列优先级：主线在最上，资料在最下 */
+export const KIND_RANK: Record<ThreadNode['kind'], number> = { main: 0, branch: 1, source: 2 };
 
 export interface LayoutResult {
   nodes: ThreadNode[];
-  /** 每列（主线下标）的 x 起止，便于画主线连接 */
-  mainCount: number;
+  /** 根节点数量（主线起点，可以有多个） */
+  rootCount: number;
 }
 
 /**
- * 布局：主线水平排列在顶层，支线从所属节点向下生长（类似思维导图）。
- * 用简化的 tidy-tree 算法，保证子树互不重叠。
+ * 左到右的树形布局（tidy tree）。
+ *
+ * 主线与支线统一当成一棵树来排：
+ *  - 一个节点只有一个子节点时 → 排成一条水平直线（就是原来的「一条线」观感）
+ *  - 一个节点有多个子节点时 → 向下分叉，展示并列的后续脉络
+ *
+ * 因此「线性」和「树形」是同一种布局，不必切换模式。
  */
 export function layoutGraph(all: ThreadNode[]): LayoutResult {
+  const ids = new Set(all.map((n) => n.id));
+
+  // 父节点不存在（被删掉）的节点按根节点处理，避免整棵子树丢失
   const byParent = new Map<string | null, ThreadNode[]>();
   for (const n of all) {
-    const list = byParent.get(n.parentId) ?? [];
+    const key = n.parentId && ids.has(n.parentId) ? n.parentId : null;
+    const list = byParent.get(key) ?? [];
     list.push(n);
-    byParent.set(n.parentId, list);
+    byParent.set(key, list);
   }
 
-  const mains = (byParent.get(null) ?? [])
-    .filter((n) => n.kind === 'main')
-    .sort((a, b) => a.order - b.order);
-
-  // 支线按创建时间排序，保持稳定
+  // 同级排序：主线 → 支线 → 资料（资料节点统一排在下方）
   for (const [, list] of byParent) {
-    list.sort((a, b) => a.createdAt - b.createdAt);
+    list.sort((a, b) => {
+      if (a.kind !== b.kind) return KIND_RANK[a.kind] - KIND_RANK[b.kind];
+      return a.kind === 'main' ? a.order - b.order : a.createdAt - b.createdAt;
+    });
   }
 
-  const widthCache = new Map<string, number>();
+  const heightCache = new Map<string, number>();
 
-  function subtreeWidth(node: ThreadNode): number {
-    const cached = widthCache.get(node.id);
+  /** 整棵子树需要的垂直高度 */
+  function subtreeHeight(node: ThreadNode): number {
+    const cached = heightCache.get(node.id);
     if (cached != null) return cached;
     const children = byParent.get(node.id) ?? [];
-    let w = NODE_W;
+    let h = NODE_H;
     if (children.length) {
-      let sum = 0;
-      children.forEach((c, i) => {
-        sum += subtreeWidth(c) + (i > 0 ? SIBLING_GAP : 0);
-      });
-      w = Math.max(NODE_W, sum);
+      const sum = children.reduce(
+        (acc, c, i) => acc + subtreeHeight(c) + (i > 0 ? SIBLING_GAP : 0),
+        0,
+      );
+      h = Math.max(NODE_H, sum);
     }
-    widthCache.set(node.id, w);
-    return w;
+    heightCache.set(node.id, h);
+    return h;
   }
+
+  const childrenTotal = (children: ThreadNode[]) =>
+    children.reduce((acc, c, i) => acc + subtreeHeight(c) + (i > 0 ? SIBLING_GAP : 0), 0);
 
   const positions = new Map<string, { x: number; y: number }>();
 
-  function place(node: ThreadNode, left: number, depth: number) {
-    const w = subtreeWidth(node);
-    const x = left + w / 2 - NODE_W / 2;
-    const y = depth * LEVEL_H;
-    positions.set(node.id, { x, y });
+  /** 把 node 放在水平 x、垂直 top 起的区域内，并居中 */
+  function place(node: ThreadNode, x: number, top: number) {
+    const h = subtreeHeight(node);
+    positions.set(node.id, { x, y: top + h / 2 - NODE_H / 2 });
+
     const children = byParent.get(node.id) ?? [];
     if (!children.length) return;
-    let cursor = left + (w - children.reduce((s, c, i) => s + subtreeWidth(c) + (i > 0 ? SIBLING_GAP : 0), 0)) / 2;
+
+    const childX = x + NODE_W + LEVEL_GAP;
+    let cursor = top + (h - childrenTotal(children)) / 2;
     for (const c of children) {
-      place(c, cursor, depth + 1);
-      cursor += subtreeWidth(c) + SIBLING_GAP;
+      place(c, childX, cursor);
+      cursor += subtreeHeight(c) + SIBLING_GAP;
     }
   }
 
+  const roots = byParent.get(null) ?? [];
   let cursor = 0;
-  for (const m of mains) {
-    place(m, cursor, 0);
-    cursor += subtreeWidth(m) + MAIN_GAP;
+  for (const root of roots) {
+    place(root, 0, cursor);
+    cursor += subtreeHeight(root) + ROOT_GAP;
   }
 
-  // 孤立节点（没有父、又不是 main）兜底放在最右
+  // 理论上不会发生（所有节点都会被归到某个根下），兜底避免位置缺失
   for (const n of all) {
-    if (!positions.has(n.id)) {
-      positions.set(n.id, { x: cursor, y: 0 });
-      cursor += NODE_W + SIBLING_GAP;
-    }
+    if (!positions.has(n.id)) positions.set(n.id, { x: cursor, y: 0 });
   }
 
   return {
@@ -86,6 +104,57 @@ export function layoutGraph(all: ThreadNode[]): LayoutResult {
       const p = positions.get(n.id)!;
       return n.x === p.x && n.y === p.y ? n : { ...n, x: p.x, y: p.y };
     }),
-    mainCount: mains.length,
+    rootCount: roots.length,
   };
+}
+
+/**
+ * 主线的显示序号：按前序遍历（先根后子）编号。
+ * 线性时会得到 1,2,3…，分叉时子分支继续往后排，保证阅读顺序自然。
+ */
+export function mainlineNumbers(all: ThreadNode[]): Map<string, number> {
+  const ids = new Set(all.map((n) => n.id));
+  const byParent = new Map<string | null, ThreadNode[]>();
+  for (const n of all) {
+    if (n.kind !== 'main') continue;
+    const key = n.parentId && ids.has(n.parentId) ? n.parentId : null;
+    const list = byParent.get(key) ?? [];
+    list.push(n);
+    byParent.set(key, list);
+  }
+
+  const out = new Map<string, number>();
+  let counter = 0;
+  const walk = (parentId: string | null) => {
+    const children = (byParent.get(parentId) ?? []).slice().sort((a, b) => a.order - b.order);
+    for (const child of children) {
+      counter += 1;
+      out.set(child.id, counter);
+      walk(child.id);
+    }
+  };
+  walk(null);
+  return out;
+}
+
+/** 按显示顺序（前序）排列的主线节点，序号与界面上看到的一致 */
+export function orderedMainline(all: ThreadNode[]): ThreadNode[] {
+  const nums = mainlineNumbers(all);
+  return all
+    .filter((n) => n.kind === 'main')
+    .sort((a, b) => (nums.get(a.id) ?? 0) - (nums.get(b.id) ?? 0));
+}
+
+/** 从根到该节点的路径（用于面包屑导航） */
+export function nodePath(all: ThreadNode[], nodeId: string): ThreadNode[] {
+  const byId = new Map(all.map((n) => [n.id, n]));
+  const path: ThreadNode[] = [];
+  let cur = byId.get(nodeId);
+  const guard = new Set<string>();
+  while (cur && !guard.has(cur.id)) {
+    guard.add(cur.id);
+    path.unshift(cur);
+    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+  }
+  return path;
 }

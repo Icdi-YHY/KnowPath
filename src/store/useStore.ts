@@ -7,8 +7,17 @@ import {
   saveSettings as dbSaveSettings,
   setActiveKbId as dbSetActiveKbId,
 } from '@/db/db';
-import { DEFAULT_SETTINGS, type ChatMessage, type CrossLink, type Doc, type KnowledgeBase, type Settings, type ThreadNode } from '@/types';
-import { layoutGraph } from '@/services/layout';
+import {
+  DEFAULT_SETTINGS,
+  type ChatMessage,
+  type CrossLink,
+  type Doc,
+  type KnowledgeBase,
+  type PendingMerge,
+  type Settings,
+  type ThreadNode,
+} from '@/types';
+import { layoutGraph, orderedMainline } from '@/services/layout';
 import * as ai from '@/services/ai';
 
 export type ViewMode = 'kb' | 'graph' | 'chat';
@@ -38,6 +47,8 @@ interface State {
   error: string | null;
   /** 非致命提醒（如输出被截断、已自动重试），用黄色提示条展示 */
   notice: string | null;
+  /** 增量导入后待用户确认的合并建议 */
+  pendingMerge: PendingMerge | null;
 
   init: () => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
@@ -63,6 +74,10 @@ interface State {
   regenerateNode: (nodeId: string) => Promise<void>;
   addBranch: (parentId: string, question: string) => Promise<void>;
   deleteNode: (id: string) => Promise<void>;
+
+  analyzeNewDocs: (docNames: string[]) => Promise<void>;
+  applyMerge: () => Promise<void>;
+  discardMerge: () => Promise<void>;
 
   sendMessage: (nodeId: string, text: string) => Promise<void>;
   stop: () => void;
@@ -99,6 +114,35 @@ function makeNode(
   return { ...base, ...clean };
 }
 
+/**
+ * 把 AI 返回的树形主线草稿展平成带 parentId / order 的节点数组。
+ * order 是「同级中的顺序」，不再是全局线性序号。
+ */
+function flattenMainline(
+  kbId: string,
+  drafts: ai.MainlineDraftNode[],
+  parentId: string | null = null,
+): ThreadNode[] {
+  const out: ThreadNode[] = [];
+  drafts.forEach((draft, index) => {
+    const node = makeNode(kbId, index, {
+      title: draft.title,
+      summary: draft.summary,
+      content: draft.content,
+      kind: 'main',
+      parentId,
+    });
+    out.push(node);
+    out.push(...flattenMainline(kbId, draft.children, node.id));
+  });
+  return out;
+}
+
+/** 某个父节点下已有的主线子节点数量，用作新增节点的同级序号 */
+function siblingOrder(all: ThreadNode[], parentId: string | null): number {
+  return all.filter((n) => n.kind === 'main' && (n.parentId ?? null) === parentId).length;
+}
+
 /** 计算整齐布局，但保留用户手动拖动过（pinned）的节点位置 */
 function mergeLayout(nodes: ThreadNode[]): ThreadNode[] {
   const laid = layoutGraph(nodes).nodes;
@@ -125,6 +169,7 @@ export const useStore = create<State>((set, get) => ({
   busy: null,
   error: null,
   notice: null,
+  pendingMerge: null,
 
   init: async () => {
     const [settings, kbs, activeKbId] = await Promise.all([
@@ -166,18 +211,28 @@ export const useStore = create<State>((set, get) => ({
   },
 
   deleteKb: async (id) => {
-    await db.transaction('rw', db.kbs, db.nodes, db.crossLinks, db.messages, async () => {
+    await db.transaction('rw', db.kbs, db.nodes, db.crossLinks, db.messages, db.pendingMerges, async () => {
       await db.kbs.delete(id);
       await db.nodes.where('kbId').equals(id).delete();
       await db.crossLinks.where('kbId').equals(id).delete();
       await db.messages.where('kbId').equals(id).delete();
+      await db.pendingMerges.where('kbId').equals(id).delete();
     });
     const kbs = get().kbs.filter((k) => k.id !== id);
     set({ kbs });
     if (get().activeKbId === id) {
       const next = kbs[0]?.id ?? null;
       if (next) await get().setActiveKb(next);
-      else set({ activeKbId: null, nodes: [], crossLinks: [], messages: [], activeNodeId: null, view: 'kb' });
+      else
+        set({
+          activeKbId: null,
+          nodes: [],
+          crossLinks: [],
+          messages: [],
+          pendingMerge: null,
+          activeNodeId: null,
+          view: 'kb',
+        });
     }
   },
 
@@ -189,10 +244,11 @@ export const useStore = create<State>((set, get) => ({
   },
 
   setActiveKb: async (id, silent = false) => {
-    const [nodes, crossLinks, messages] = await Promise.all([
+    const [nodes, crossLinks, messages, pending] = await Promise.all([
       db.nodes.where('kbId').equals(id).toArray(),
       db.crossLinks.where('kbId').equals(id).toArray(),
       db.messages.where('kbId').equals(id).toArray(),
+      db.pendingMerges.where('kbId').equals(id).first(),
     ]);
     const laid = mergeLayout(nodes);
     set({
@@ -200,6 +256,7 @@ export const useStore = create<State>((set, get) => ({
       nodes: laid,
       crossLinks,
       messages,
+      pendingMerge: pending ?? null,
       activeNodeId: nodes.find((n) => n.kind === 'main')?.id ?? null,
       view: silent && get().view !== 'kb' ? get().view : 'kb',
     });
@@ -318,6 +375,133 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
     set((s) => ({ nodes: s.nodes.map((n) => (n.id === id ? { ...n, title } : n)) }));
   },
 
+  /* ------------------------- 增量导入与合并 ------------------------- */
+
+  /**
+   * 往「已有主线」的知识库导入新文件后调用：
+   * 只做关联分析，**不改动主线**，结果放进 pendingMerge 等用户确认。
+   */
+  analyzeNewDocs: async (docNames) => {
+    const { activeKbId, kbs, settings, nodes } = get();
+    const kb = kbs.find((k) => k.id === activeKbId);
+    if (!kb || !docNames.length) return;
+
+    const mainline = orderedMainline(nodes);
+    // 还没有主线就谈不上「增量」，直接返回（用户会走「生成主线」）
+    if (!mainline.length) return;
+
+    const text = docNames
+      .map((name) => kb.docs.find((d) => d.name === name))
+      .filter((d): d is Doc => Boolean(d))
+      .map((d) => `## 文档：${d.name}\n${d.content}`)
+      .join('\n\n');
+
+    set({ busy: 'merge', error: null, notice: null });
+    abort = new AbortController();
+    try {
+      const analysis = await ai.analyzeMerge(settings, docNames, text, mainline, abort.signal);
+      const pending: PendingMerge = {
+        id: nanoid(10),
+        kbId: kb.id,
+        docNames,
+        source: analysis.source,
+        links: analysis.links.map((l) => ({
+          nodeId: l.nodeId,
+          title: nodes.find((n) => n.id === l.nodeId)?.title ?? '',
+          reason: l.reason,
+        })),
+        newNodes: analysis.newNodes.map((n) => ({
+          ...n,
+          parentTitle: n.parentId ? nodes.find((x) => x.id === n.parentId)?.title ?? null : null,
+        })),
+        createdAt: now(),
+      };
+      await db.pendingMerges.where('kbId').equals(kb.id).delete();
+      await db.pendingMerges.add(pending);
+      set({ pendingMerge: pending, busy: null, view: 'graph' });
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') set({ error: (e as Error).message, busy: null });
+      else set({ busy: null });
+    }
+  },
+
+  /** 确认合并：建立资料节点与关联线，并把建议的新知识点插入主线 */
+  applyMerge: async () => {
+    const { pendingMerge, activeKbId, nodes, crossLinks } = get();
+    if (!pendingMerge || !activeKbId) return;
+    const kbId = activeKbId;
+    set({ busy: 'merge-apply', error: null });
+    try {
+      const created: ThreadNode[] = [];
+
+      // 1) 资料节点（独立根节点，虚线连到它支撑的知识点）
+      const source = makeNode(kbId, 0, {
+        title: pendingMerge.source.title,
+        summary: pendingMerge.source.summary,
+        content: `> 代表导入的材料：${pendingMerge.docNames.join('、')}\n\n${pendingMerge.source.summary}`,
+        kind: 'source',
+        parentId: null,
+      });
+      created.push(source);
+
+      // 2) 建议新增的知识点，挂到各自指定的父节点下
+      for (const n of pendingMerge.newNodes) {
+        created.push(
+          makeNode(kbId, siblingOrder([...nodes, ...created], n.parentId), {
+            title: n.title,
+            summary: n.summary,
+            content: n.content,
+            kind: 'main',
+            parentId: n.parentId,
+          }),
+        );
+      }
+
+      // 3) 关联线：资料节点 → 相关知识点
+      const links: CrossLink[] = pendingMerge.links
+        .filter((l) => nodes.some((n) => n.id === l.nodeId))
+        .map((l) => ({
+          id: nanoid(10),
+          kbId,
+          sourceId: source.id,
+          targetId: l.nodeId,
+          reason: l.reason,
+          createdAt: now(),
+        }));
+
+      await db.nodes.bulkAdd(created);
+      if (links.length) await db.crossLinks.bulkAdd(links);
+
+      const laid = mergeLayout([...nodes, ...created]);
+      await Promise.all(laid.map((n) => db.nodes.update(n.id, { x: n.x, y: n.y })));
+      await db.pendingMerges.delete(pendingMerge.id);
+
+      const parts = [
+        pendingMerge.newNodes.length ? `新增 ${pendingMerge.newNodes.length} 个知识点` : '',
+        links.length ? `${links.length} 条关联` : '',
+      ].filter(Boolean);
+
+      set({
+        nodes: laid,
+        crossLinks: [...crossLinks, ...links],
+        pendingMerge: null,
+        busy: null,
+        activeNodeId: source.id,
+        notice: parts.length ? `已合并：${parts.join('、')}` : '已合并（本次没有需要新增的内容）',
+      });
+    } catch (e) {
+      set({ error: (e as Error).message, busy: null });
+    }
+  },
+
+  /** 忽略本次合并建议（材料仍留在知识库里，继续作为 AI 的上下文） */
+  discardMerge: async () => {
+    const pending = get().pendingMerge;
+    if (!pending) return;
+    await db.pendingMerges.delete(pending.id);
+    set({ pendingMerge: null, notice: '已忽略本次合并建议，材料仍保留在知识库中' });
+  },
+
   generateMainline: async () => {
     const { activeKbId, kbs, settings } = get();
     const kb = kbs.find((k) => k.id === activeKbId);
@@ -332,7 +516,7 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
       const result = await ai.generateMainline(settings, kb, abort.signal);
       await db.nodes.where('kbId').equals(kb.id).delete();
       await db.crossLinks.where('kbId').equals(kb.id).delete();
-      const nodes = result.nodes.map((n, i) => makeNode(kb.id, i, { ...n, kind: 'main' }));
+      const nodes = flattenMainline(kb.id, result.nodes);
       await db.nodes.bulkAdd(nodes);
       const laid = layoutGraph(nodes).nodes;
       await Promise.all(laid.map((n) => db.nodes.update(n.id, { x: n.x, y: n.y })));

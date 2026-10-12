@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import clsx from 'clsx';
 import {
   BookOpen,
@@ -10,6 +10,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { KIND_RANK, mainlineNumbers } from '@/services/layout';
 import { useStore } from '@/store/useStore';
 import type { ThreadNode } from '@/types';
 import { StatusDot } from './ui';
@@ -33,12 +34,16 @@ export function Sidebar({
   const selectNode = useStore((s) => s.selectNode);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
-  const mains = nodes.filter((n) => n.kind === 'main').sort((a, b) => a.order - b.order);
+  const mains = nodes.filter((n) => n.kind === 'main');
+  const numbers = useMemo(() => mainlineNumbers(nodes), [nodes]);
 
   const renderTree = (parentId: string | null, depth: number) => {
     const children = nodes
-      .filter((n) => n.parentId === parentId)
-      .sort((a, b) => (parentId === null ? a.order - b.order : a.createdAt - b.createdAt));
+      .filter((n) => (n.parentId ?? null) === parentId)
+      .sort((a, b) => {
+        if (a.kind !== b.kind) return KIND_RANK[a.kind] - KIND_RANK[b.kind];
+        return a.kind === 'main' ? a.order - b.order : a.createdAt - b.createdAt;
+      });
     return children.map((n) => {
       const kids = nodes.filter((c) => c.parentId === n.id);
       const isOpen = expanded[n.id] ?? true;
@@ -78,7 +83,7 @@ export function Sidebar({
               )}
               title={n.title}
             >
-              {n.kind === 'main' && <span className="text-brand-400/80 mr-1">{n.order + 1}.</span>}
+              {n.kind === 'main' && <span className="text-brand-400/80 mr-1">{numbers.get(n.id)}.</span>}
               {n.kind === 'branch' && <span className="text-emerald-400/70 mr-1">└</span>}
               {n.title}
             </span>
