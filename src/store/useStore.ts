@@ -72,7 +72,7 @@ interface State {
   setNodeStatus: (id: string, status: ThreadNode['status']) => Promise<void>;
   renameNode: (id: string, title: string) => Promise<void>;
 
-  generateMainline: () => Promise<void>;
+  generateMainline: () => Promise<boolean>;
   regenerateNode: (nodeId: string) => Promise<void>;
   addBranch: (parentId: string, question: string) => Promise<void>;
   deleteNode: (id: string) => Promise<void>;
@@ -551,10 +551,10 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
   generateMainline: async () => {
     const { activeKbId, kbs, settings } = get();
     const kb = kbs.find((k) => k.id === activeKbId);
-    if (!kb) return;
+    if (!kb) return false;
     if (!kb.docs.length) {
       set({ error: '请先往知识库里添加内容，再生成主线' });
-      return;
+      return false;
     }
     set({ busy: 'mainline', error: null, notice: null });
     abort = new AbortController();
@@ -575,9 +575,11 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
         // 只生成了很少的知识点 / 输出曾被截断 → 明确告诉用户，而不是静默接受
         notice: result.warning ?? null,
       });
+      return true;
     } catch (e) {
       if ((e as Error).name !== 'AbortError') set({ error: (e as Error).message, busy: null });
       else set({ busy: null });
+      return false;
     }
   },
 
@@ -630,7 +632,10 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
       // 关联分析
       let links: CrossLink[] = [];
       try {
-        const mainline = nodes.filter((n) => n.kind === 'main').sort((a, b) => a.order - b.order);
+        // 必须用前序遍历（orderedMainline）而不是按 order 排序：
+        // 树形结构下 order 只是「同级序号」，按它排会得到 [0,0,0,1,2…] 这种乱序，
+        // AI 看到的「第 N 个知识点」和界面上显示的完全对不上，关联会指错节点
+        const mainline = orderedMainline(nodes);
         const suggestions = await ai.suggestCrossLinks(settings, branch, mainline, abort.signal);
         links = suggestions.map((s) => ({
           id: nanoid(10),
@@ -646,10 +651,16 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
       }
 
       const all = [...nodes, branch];
-      const laid = layoutGraph(all).nodes;
+      // 用 mergeLayout 才能保住用户手动拖动过（pinned）的节点位置
+      const prev = new Map(all.map((n) => [n.id, n]));
+      const laid = mergeLayout(all);
       await Promise.all(
         laid
-          .filter((n) => n.id === branch.id || all.some((m) => m.id === n.id && (m.x !== n.x || m.y !== n.y)))
+          .map((n) => {
+            const p = prev.get(n.id);
+            return !p || p.x !== n.x || p.y !== n.y ? n : null;
+          })
+          .filter((n): n is ThreadNode => n !== null)
           .map((n) => db.nodes.update(n.id, { x: n.x, y: n.y })),
       );
       set((s) => ({

@@ -342,8 +342,8 @@ export function KnowledgePanel() {
             className="btn-primary w-full !py-3"
             disabled={!kb.docs.length || busy === 'mainline' || busy === 'merge'}
             onClick={async () => {
-              await generateMainline();
-              setView('graph');
+              // 只有真正生成成功才跳转；否则用户会看到一个空白图谱，反而错过报错信息
+              if (await generateMainline()) setView('graph');
             }}
           >
             {busy === 'mainline' ? <Spinner /> : <Wand2 size={17} />}
