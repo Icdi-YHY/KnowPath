@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, Menu, X } from 'lucide-react';
+import { AlertCircle, Info, Menu, X } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { Sidebar } from '@/components/Sidebar';
 import { KnowledgePanel } from '@/components/KnowledgePanel';
@@ -14,6 +14,8 @@ export default function App() {
   const view = useStore((s) => s.view);
   const error = useStore((s) => s.error);
   const setError = useStore((s) => s.setError);
+  const notice = useStore((s) => s.notice);
+  const setNotice = useStore((s) => s.setNotice);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -73,16 +75,27 @@ export default function App() {
         </main>
       </div>
 
-      {/* 错误提示 */}
-      {error && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 max-w-[92vw] sm:max-w-lg animate-fade-in">
-          <div className="flex items-start gap-2.5 rounded-xl bg-red-500/15 border border-red-500/40 backdrop-blur px-4 py-3 shadow-xl">
-            <AlertCircle size={17} className="text-red-300 shrink-0 mt-0.5" />
-            <div className="text-[13px] text-red-100 leading-relaxed flex-1 break-words">{error}</div>
-            <button className="text-red-300 hover:text-white shrink-0" onClick={() => setError(null)}>
-              <X size={15} />
-            </button>
-          </div>
+      {/* 提示条：错误（红）与提醒（黄） */}
+      {(error || notice) && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 flex w-max max-w-[92vw] flex-col gap-2 animate-fade-in sm:max-w-lg">
+          {error && (
+            <div className="flex items-start gap-2.5 rounded-xl border border-red-500/40 bg-red-500/15 px-4 py-3 shadow-xl backdrop-blur">
+              <AlertCircle size={17} className="mt-0.5 shrink-0 text-red-300" />
+              <div className="flex-1 break-words text-[13px] leading-relaxed text-red-100">{error}</div>
+              <button className="shrink-0 text-red-300 hover:text-white" onClick={() => setError(null)}>
+                <X size={15} />
+              </button>
+            </div>
+          )}
+          {notice && (
+            <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/40 bg-amber-500/15 px-4 py-3 shadow-xl backdrop-blur">
+              <Info size={17} className="mt-0.5 shrink-0 text-amber-300" />
+              <div className="flex-1 break-words text-[13px] leading-relaxed text-amber-100">{notice}</div>
+              <button className="shrink-0 text-amber-300 hover:text-white" onClick={() => setNotice(null)}>
+                <X size={15} />
+              </button>
+            </div>
+          )}
         </div>
       )}
 

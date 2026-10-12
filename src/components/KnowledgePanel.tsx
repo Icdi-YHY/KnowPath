@@ -1,5 +1,8 @@
 import { useRef, useState } from 'react';
+import clsx from 'clsx';
 import {
+  AlertTriangle,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   FileText,
@@ -10,7 +13,16 @@ import {
   Wand2,
 } from 'lucide-react';
 import { useStore } from '@/store/useStore';
+import { ocrImage } from '@/services/ai';
+import { ACCEPT_ATTR, extractText, MAX_FILE_BYTES } from '@/services/parse';
 import { EmptyState, Spinner } from './ui';
+
+interface ImportItem {
+  id: string;
+  name: string;
+  status: 'pending' | 'parsing' | 'ok' | 'error';
+  message?: string;
+}
 
 export function KnowledgePanel() {
   const kbs = useStore((s) => s.kbs);
@@ -32,6 +44,60 @@ export function KnowledgePanel() {
   const [openDocs, setOpenDocs] = useState<Record<string, boolean>>({});
   const [editing, setEditing] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
+  const [imports, setImports] = useState<ImportItem[]>([]);
+  const [importing, setImporting] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+
+  const runImport = async (files: FileList | null) => {
+    if (!files || !files.length) return;
+    const list = Array.from(files);
+    const items: ImportItem[] = list.map((f, i) => ({
+      id: `${i}-${f.name}-${f.size}`,
+      name: f.name,
+      status: 'pending',
+    }));
+    setImports(items);
+    setImporting(true);
+
+    // 图片 / 扫描件需要视觉模型；没配 Key 或模型不支持会给出明确提示
+    const settings = useStore.getState().settings;
+    const vision = settings.apiKey
+      ? (dataUrl: string, hint?: string) => ocrImage(settings, dataUrl, hint)
+      : undefined;
+
+    for (let i = 0; i < list.length; i++) {
+      const file = list[i];
+      const id = items[i].id;
+      const patch = (p: Partial<ImportItem>) =>
+        setImports((prev) => prev.map((it) => (it.id === id ? { ...it, ...p } : it)));
+
+      if (file.size > MAX_FILE_BYTES) {
+        patch({
+          status: 'error',
+          message: `文件 ${(file.size / 1024 / 1024).toFixed(1)}MB 超过 ${Math.round(
+            MAX_FILE_BYTES / 1024 / 1024,
+          )}MB 上限，已跳过`,
+        });
+        continue;
+      }
+
+      patch({ status: 'parsing', message: '正在解析…' });
+      try {
+        const { text, warning } = await extractText(file, {
+          vision,
+          onProgress: (m) => patch({ message: m }),
+        });
+        await addDoc(file.name, text);
+        patch({
+          status: 'ok',
+          message: warning ?? `已导入 ${text.length.toLocaleString()} 字`,
+        });
+      } catch (e) {
+        patch({ status: 'error', message: (e as Error).message });
+      }
+    }
+    setImporting(false);
+  };
 
   if (!kb) {
     return (
@@ -53,15 +119,6 @@ export function KnowledgePanel() {
     );
   }
 
-  const onFiles = async (files: FileList | null) => {
-    if (!files) return;
-    for (const f of Array.from(files)) {
-      if (f.size > 2 * 1024 * 1024) continue;
-      const text = await f.text();
-      await addDoc(f.name, text);
-    }
-  };
-
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-3xl mx-auto px-4 py-5 sm:py-8">
@@ -75,7 +132,22 @@ export function KnowledgePanel() {
         </div>
 
         {/* 添加区 */}
-        <div className="card p-4 mt-5">
+        <div
+          className={clsx(
+            'card p-4 mt-5 transition-colors',
+            dragOver && 'border-brand-500 bg-brand-500/5',
+          )}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver(true);
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(false);
+            runImport(e.dataTransfer.files);
+          }}
+        >
           <div className="text-sm font-medium text-ink-100 mb-3 flex items-center gap-1.5">
             <Plus size={15} /> 添加材料
           </div>
@@ -103,23 +175,81 @@ export function KnowledgePanel() {
             >
               添加
             </button>
-            <button className="btn-ghost" onClick={() => fileRef.current?.click()}>
-              <Upload size={15} /> 上传文件（可多选）
+            <button
+              className="btn-ghost"
+              disabled={importing}
+              onClick={() => fileRef.current?.click()}
+            >
+              {importing ? <Spinner /> : <Upload size={15} />} 上传文件（可多选 / 可拖入）
             </button>
             <input
               ref={fileRef}
               type="file"
-              accept=".txt,.md,.markdown,.json,.csv,.log,text/*"
+              accept={ACCEPT_ATTR}
               multiple
               hidden
               onChange={(e) => {
-                onFiles(e.target.files);
+                runImport(e.target.files);
                 e.target.value = '';
               }}
             />
-            <span className="text-xs text-ink-500">支持拖入 .txt / .md 等文本文件，单文件 ≤ 2MB</span>
+          </div>
+          <div className="mt-2 text-[11.5px] leading-relaxed text-ink-500">
+            支持 <b className="text-ink-300">PPTX / DOCX / XLSX / PDF / 图片 / txt·md</b> 等，
+            单文件 ≤ {Math.round(MAX_FILE_BYTES / 1024 / 1024)}MB。
+            <br />
+            图片与扫描件 PDF 需要「认字」，会调用<b className="text-ink-300">支持视觉的模型</b>
+            （gpt-4o / qwen-vl-max / glm-4v 等）；DeepSeek 不支持图片。
+            <br />
+            <span className="text-amber-400/80">.ppt / .doc 是 97-2003 老格式，只能尽力提取，建议另存为新格式。</span>
           </div>
         </div>
+
+        {/* 导入结果 */}
+        {imports.length > 0 && (
+          <div className="card mt-4 overflow-hidden">
+            <div className="flex items-center gap-2 px-3.5 py-2.5 border-b border-ink-700/60">
+              <span className="text-sm font-medium text-ink-100">导入结果</span>
+              <span className="text-xs text-ink-500">
+                {imports.filter((i) => i.status === 'ok').length}/{imports.length} 成功
+              </span>
+              <div className="flex-1" />
+              {importing ? (
+                <Spinner className="text-brand-400" />
+              ) : (
+                <button className="text-xs text-ink-400 hover:text-white" onClick={() => setImports([])}>
+                  清空
+                </button>
+              )}
+            </div>
+            <div className="divide-y divide-ink-700/40">
+              {imports.map((it) => (
+                <div key={it.id} className="flex items-start gap-2 px-3.5 py-2">
+                  {it.status === 'ok' ? (
+                    <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-accent-500" />
+                  ) : it.status === 'error' ? (
+                    <AlertTriangle size={15} className="mt-0.5 shrink-0 text-red-400" />
+                  ) : (
+                    <Spinner className="mt-0.5 shrink-0 text-ink-400" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px] text-ink-100">{it.name}</div>
+                    {it.message && (
+                      <div
+                        className={clsx(
+                          'mt-0.5 text-[11.5px] leading-relaxed',
+                          it.status === 'error' ? 'text-red-300' : 'text-ink-400',
+                        )}
+                      >
+                        {it.message}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* 材料列表 */}
         <div className="mt-5 space-y-2">

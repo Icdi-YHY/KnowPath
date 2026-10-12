@@ -30,10 +30,13 @@ function send(res, status, headers, body) {
 }
 
 /**
- * 在 127.0.0.1 的随机空闲端口上托管 rootDir。
- * @returns {Promise<{ port: number, close: () => void }>}
+ * 托管静态目录。
+ * @param {string} rootDir 要托管的目录
+ * @param {{ host?: string, port?: number }} [options] 默认 127.0.0.1 随机端口（Electron 用）
+ * @returns {Promise<{ port: number, host: string, close: () => void }>}
  */
-function serveStatic(rootDir) {
+function serveStatic(rootDir, options = {}) {
+  const { host = '127.0.0.1', port = 0 } = options;
   const ROOT = path.resolve(rootDir);
   return new Promise((resolvePort, rejectPort) => {
     const server = http.createServer((req, res) => {
@@ -78,8 +81,13 @@ function serveStatic(rootDir) {
     });
 
     server.on('error', rejectPort);
-    server.listen(0, '127.0.0.1', () => {
-      resolvePort({ port: server.address().port, close: () => server.close() });
+    server.listen(port, host, () => {
+      const addr = server.address();
+      resolvePort({
+        port: addr.port,
+        host: typeof addr === 'object' && addr ? addr.address : host,
+        close: () => server.close(),
+      });
     });
   });
 }

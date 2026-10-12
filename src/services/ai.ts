@@ -11,6 +11,7 @@ import {
   chatSystem,
   crossLinkSystem,
   crossLinkUser,
+  explainSystem,
   explainUser,
   mainlineSystem,
   mainlineUser,
@@ -23,9 +24,14 @@ export class AIError extends Error {
   }
 }
 
+/** OpenAI 兼容的多模态内容片段 */
+export type VisionPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 export interface ChatMsg {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: string | VisionPart[];
 }
 
 function endpoint(baseUrl: string): string {
@@ -261,19 +267,20 @@ function formatHttpError(status: number, detail: string): string {
   return `AI 接口返回 ${status}：${d}`;
 }
 
-/** 流式对话，逐段回调增量文本 */
+/** 流式对话，逐段回调增量文本；返回值带截断标记 */
 export async function chatStream(
   settings: Settings,
   messages: ChatMsg[],
   onDelta: (delta: string) => void,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<Completion> {
   const res = await request(settings, messages, true, false, signal);
   const reader = res.body?.getReader();
   if (!reader) throw new AIError('响应没有数据流');
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let full = '';
+  let finishReason: string | undefined;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -287,7 +294,9 @@ export async function chatStream(
       if (!data || data === '[DONE]') continue;
       try {
         const json = JSON.parse(data);
-        const delta: string = json.choices?.[0]?.delta?.content ?? '';
+        const choice = json.choices?.[0];
+        if (choice?.finish_reason) finishReason = choice.finish_reason;
+        const delta: string = choice?.delta?.content ?? '';
         if (delta) {
           full += delta;
           onDelta(delta);
@@ -297,7 +306,35 @@ export async function chatStream(
       }
     }
   }
-  return full;
+  return { content: full, truncated: finishReason === 'length' };
+}
+
+export interface Completion {
+  content: string;
+  /** 服务端明确告知「因长度上限被截断」（finish_reason === 'length'） */
+  truncated: boolean;
+}
+
+/** 非流式补全，额外返回截断标记 —— 判断内容是否完整的最可靠依据 */
+export async function completeDetailed(
+  settings: Settings,
+  messages: ChatMsg[],
+  signal?: AbortSignal,
+  json = false,
+): Promise<Completion> {
+  const res = await request(settings, messages, false, json, signal);
+  const data = await res.json();
+  const choice = data.choices?.[0];
+  const content: string = choice?.message?.content ?? '';
+  const truncated = choice?.finish_reason === 'length';
+  if (!content) {
+    throw new AIError(
+      truncated
+        ? 'AI 输出被长度上限截断且没有返回内容，请在「设置」里调大最大 token。'
+        : 'AI 没有返回内容',
+    );
+  }
+  return { content, truncated };
 }
 
 /** 非流式一次性补全 */
@@ -307,18 +344,7 @@ export async function complete(
   signal?: AbortSignal,
   json = false,
 ): Promise<string> {
-  const res = await request(settings, messages, false, json, signal);
-  const data = await res.json();
-  const content: string = data.choices?.[0]?.message?.content ?? '';
-  if (!content) {
-    const reason = data.choices?.[0]?.finish_reason;
-    throw new AIError(
-      reason === 'length'
-        ? 'AI 输出被长度上限截断且没有返回内容，请在「设置」里调大最大 token。'
-        : 'AI 没有返回内容',
-    );
-  }
-  return content;
+  return (await completeDetailed(settings, messages, signal, json)).content;
 }
 
 /* ------------------------------------------------------------------ */
@@ -326,8 +352,12 @@ export async function complete(
 /* ------------------------------------------------------------------ */
 
 /**
- * 请求 JSON 结果；若解析失败，自动用更精简的要求重试一次。
- * 这是应对「输出被截断」的最后一道保险。
+ * 请求 JSON 结果，做两层保护：
+ *  1) 解析失败、被截断、或结果明显退化（由 validate 判定）→ 自动重试一次
+ *  2) 重试后仍不理想 → 返回可用的部分结果，并附带 warning 让用户知情
+ *
+ * 注意：不能只看「是否解析成功」。被截断的 JSON 常能被补全成合法 JSON，
+ * 但内容只剩一小截 —— 所以必须额外用 finish_reason 与 validate 兜住。
  */
 async function completeJson<T>(
   settings: Settings,
@@ -335,35 +365,58 @@ async function completeJson<T>(
   user: string,
   retryNote: string,
   signal?: AbortSignal,
-): Promise<T> {
-  const first = await complete(
-    settings,
-    [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    signal,
-    true,
-  );
-  try {
-    return extractJson<T>(first);
-  } catch {
-    console.warn('[knowpath] JSON 解析失败，正在自动重试一次…');
-    const second = await complete(
+  validate?: (value: T) => string | null,
+): Promise<{ value: T; warning?: string }> {
+  const attempt = async (extra?: string) => {
+    const { content, truncated } = await completeDetailed(
       settings,
       [
         { role: 'system', content: system },
-        { role: 'user', content: `${user}\n\n【重要】你上一次的输出无法被解析为 JSON。${retryNote}` },
+        { role: 'user', content: extra ? `${user}\n\n${extra}` : user },
       ],
       signal,
       true,
     );
-    return extractJson<T>(second);
+    let value: T | null = null;
+    let parseError = '';
+    try {
+      value = extractJson<T>(content);
+    } catch (e) {
+      parseError = (e as Error).message;
+    }
+    const issue = value === null ? parseError || '解析失败' : validate?.(value) ?? null;
+    return { value, truncated, issue };
+  };
+
+  const first = await attempt();
+  if (first.value !== null && !first.issue) {
+    return {
+      value: first.value,
+      warning: first.truncated ? '输出被长度上限截断，内容可能不完整' : undefined,
+    };
   }
+
+  const reason = first.truncated ? '输出被长度上限截断' : first.issue || '解析失败';
+  console.warn(`[knowpath] ${reason}，正在自动重试一次…`);
+
+  const second = await attempt(`【重要】上一次失败原因：${reason}。${retryNote}`);
+  if (second.value !== null) {
+    return {
+      value: second.value,
+      warning: second.issue ? `重试后仍可能不完整（${reason}）` : `已自动重试：${reason}`,
+    };
+  }
+
+  throw new AIError(`AI 连续两次返回的内容都无法使用（${reason}），请重试或换用更强的模型。`);
 }
+
+/** 主线至少要有这么多个知识点，否则视为「被截断/退化」 */
+const MIN_MAINLINE_NODES = 4;
 
 export interface MainlineResult {
   title: string;
+  /** 非致命的问题提示（例如输出被截断、自动重试过） */
+  warning?: string;
   nodes: {
     parentId: null;
     kind: 'main';
@@ -380,15 +433,22 @@ export async function generateMainline(
   kb: KnowledgeBase,
   signal?: AbortSignal,
 ): Promise<MainlineResult> {
-  const parsed = await completeJson<{
+  const { value: parsed, warning } = await completeJson<{
     title?: string;
     nodes?: { title?: string; summary?: string; content?: string }[];
   }>(
     settings,
     mainlineSystem(),
     mainlineUser(kb, settings.contextChars),
-    '请更精简：知识点不超过 8 个，每个 content 不超过 250 字，必须保证 JSON 完整闭合。',
+    '请更精简并确保 JSON 完整闭合：知识点 8~12 个，每个 content 不超过 200 字。' +
+      '如果担心写不下，可以**直接省略 content 字段**，只保留 title 和 summary —— 之后我会逐个补充讲解。',
     signal,
+    (v) => {
+      const list = Array.isArray(v) ? v : (v as { nodes?: unknown[] })?.nodes ?? [];
+      return list.length >= MIN_MAINLINE_NODES
+        ? null
+        : `只生成了 ${list.length} 个知识点，远少于要求的 8~12 个`;
+    },
   );
 
   // 容错：模型直接返回数组的情况
@@ -401,6 +461,11 @@ export async function generateMainline(
 
   return {
     title: (!Array.isArray(parsed) && parsed?.title) || `${kb.name} · 学习主线`,
+    warning:
+      warning ??
+      (nodes.length < MIN_MAINLINE_NODES
+        ? `只生成了 ${nodes.length} 个知识点，建议点「重新生成主线」再试一次`
+        : undefined),
     nodes: nodes.map((n) => ({
       parentId: null,
       kind: 'main',
@@ -412,21 +477,25 @@ export async function generateMainline(
   };
 }
 
-/** 为某个知识点生成讲解正文 */
-export async function explainNode(
+/**
+ * 生成某个知识点的讲解消息（带完整知识库上下文）。
+ * 之前「重新讲解」只把标题丢给模型、完全没用上传的材料，这里统一修正。
+ */
+export function explainMessages(
   settings: Settings,
   kb: KnowledgeBase,
   node: ThreadNode,
-  signal?: AbortSignal,
-): Promise<string> {
-  return complete(
-    settings,
-    [
-      { role: 'system', content: mainlineSystem().split('\n\n')[0] },
-      { role: 'user', content: explainUser(kb, node, settings.contextChars) },
-    ],
-    signal,
-  );
+  mainline: ThreadNode[] = [],
+): ChatMsg[] {
+  const path = mainline.length
+    ? `\n\n该知识点在这条主线中的位置：\n${mainline
+        .map((n, i) => `${i + 1}. ${n.title}${n.id === node.id ? '  ← 当前' : ''}`)
+        .join('\n')}`
+    : '';
+  return [
+    { role: 'system', content: explainSystem() },
+    { role: 'user', content: explainUser(kb, node, settings.contextChars) + path },
+  ];
 }
 
 /** 根据疑问生成一条支线 */
@@ -436,16 +505,15 @@ export async function generateBranch(
   question: string,
   signal?: AbortSignal,
 ): Promise<{ title: string; summary: string; content: string }> {
-  const text = await complete(
+  const { value: json } = await completeJson<{ title?: string; summary?: string; content?: string }>(
     settings,
-    [
-      { role: 'system', content: branchSystem() },
-      { role: 'user', content: branchUser(node, question) },
-    ],
+    branchSystem(),
+    branchUser(node, question),
+    '请只输出一个 JSON 对象，字段为 title / summary / content，content 200~400 字。',
     signal,
-    true,
+    // content 太短通常意味着输出被截断了
+    (v) => ((v.content ?? '').trim().length >= 60 ? null : '讲解内容过短，可能是输出被截断'),
   );
-  const json = extractJson<{ title?: string; summary?: string; content?: string }>(text);
   return {
     title: json.title?.trim() || question.slice(0, 16),
     summary: json.summary?.trim() || '',
@@ -474,7 +542,7 @@ export async function suggestCrossLinks(
   signal?: AbortSignal,
 ): Promise<Omit<CrossLink, 'id' | 'kbId' | 'createdAt' | 'sourceId'>[]> {
   if (!mainline.length) return [];
-  const json = await completeJson<{ links?: { index: number; reason: string }[] }>(
+  const { value: json } = await completeJson<{ links?: { index: number; reason: string }[] }>(
     settings,
     crossLinkSystem(),
     crossLinkUser({ title: node.title, summary: node.summary, content: node.content }, mainline),
@@ -489,6 +557,51 @@ export async function suggestCrossLinks(
     }
   }
   return out.slice(0, 3);
+}
+
+/**
+ * 用视觉模型把图片里的文字提取出来（图片 / 扫描件 PDF 的「认字」）。
+ * 需要服务端模型支持多模态输入。
+ */
+export async function ocrImage(
+  settings: Settings,
+  dataUrl: string,
+  hint?: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const prompt =
+    '请把这张图片中的全部文字逐字准确提取出来，保持原有段落、换行与顺序。' +
+    '不要翻译、不要总结、不要添加任何解释或评论。' +
+    '如果图片里有表格，请用 Markdown 表格还原；如果有图表 / 流程图，请用文字描述其结构与关键信息。' +
+    (hint ? `\n（来源：${hint}）` : '');
+
+  const messages: ChatMsg[] = [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: dataUrl } },
+      ],
+    },
+  ];
+
+  try {
+    const res = await request(settings, messages, false, false, signal);
+    const data = await res.json();
+    const content = data.choices?.[0]?.message?.content;
+    if (typeof content !== 'string' || !content.trim()) {
+      throw new AIError('视觉模型没有返回识别结果');
+    }
+    return content.trim();
+  } catch (e) {
+    if (e instanceof AIError && /image|vision|multimodal|modalit|图片/i.test(e.message)) {
+      throw new AIError(
+        `当前模型「${settings.model}」似乎不支持图片输入，请改用支持视觉的模型` +
+          `（如 gpt-4o / qwen-vl-max / glm-4v / moonshot-v1-8k-vision-preview）。原始错误：${e.message}`,
+      );
+    }
+    throw e;
+  }
 }
 
 export function newId(): string {

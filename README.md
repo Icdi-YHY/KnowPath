@@ -24,13 +24,40 @@ Windows / Ubuntu / Android 三端通用（同一套代码）。
 
 ---
 
+## 支持的资料格式
+
+| 格式 | 处理方式 | 可靠性 |
+| --- | --- | --- |
+| `.txt` `.md` `.json` `.csv` `.log` 等文本 | 直接读取，自动识别 UTF-8 / GB18030 | ✅ 完全准确 |
+| `.pptx` | 解包读每页文字 + 演讲者备注 | ✅ 完全准确 |
+| `.docx` | 解包读段落与表格（单元格用 `\|` 分隔） | ✅ 完全准确 |
+| `.xlsx` | 解析共享字符串与单元格 | ✅ 完全准确 |
+| `.pdf`（有文字层） | pdf.js 逐页提取 | ✅ 完全准确 |
+| `.png` `.jpg` `.webp` 等图片 | **调用视觉模型 OCR** | ⚠️ 取决于模型 |
+| `.pdf`（扫描件，无文字层） | 渲染成图后 **调用视觉模型 OCR** | ⚠️ 取决于模型 |
+| `.ppt` `.doc`（97-2003 老格式） | 尽力提取文本 | ⚠️ 可能夹杂乱码，建议另存为新格式 |
+
+**图片与扫描件必须用支持视觉的模型**：`gpt-4o` / `qwen-vl-max` / `glm-4v` / `moonshot-v1-8k-vision-preview` 等。
+**DeepSeek 系列不支持图片输入**，用它导入图片会直接给出明确报错。
+
+其他说明：
+
+- 单文件上限 **50MB**，超出会在「导入结果」里明确提示，不会静默忽略。
+- 支持多选与**拖拽导入**，每个文件单独显示解析进度与结果。
+- 解析在**导入时完成**，知识库里只存纯文本 —— 因此体积小、后续组装上下文快。
+- `.xls`（老式 Excel）不支持，请另存为 `.xlsx` 后导入。
+- 内容仍受「知识库注入上限」限制（默认 12000 字符），大文件可在设置里调大，或按章节拆成多个知识库。
+
+---
+
 ## 快速开始
 
 ```bash
 npm install        # 安装依赖
 npm run dev        # 开发模式，默认 http://localhost:5173
-npm run build      # 生产构建，产物在 dist/
-npm run preview    # 本地预览构建产物
+npm run web        # 部署到自己主机：构建 + 启动，默认 http://localhost:8080
+npm run build      # 只做生产构建，产物在 dist/
+npm run serve      # 启动静态服务器托管 dist/（默认 8080）
 ```
 
 > 首次打开会自动弹出设置，填入 AI 接口信息即可。**没有 Key 也能先用「先看示例」体验完整交互。**
@@ -53,28 +80,50 @@ npm run preview    # 本地预览构建产物
 
 ## 三端使用与打包
 
-### 方式一：PWA（零成本，推荐先这样用）
+### 方式一：部署到自己主机（网页版，推荐）
 
-已内置 Service Worker 与 Web App Manifest。
-
-- **Windows / Ubuntu**：用 Chrome / Edge 打开 → 地址栏右侧「安装」图标，即可变成独立桌面应用、可离线。
-- **Android**：用 Chrome 打开 → 菜单「添加到主屏幕」，即可像原生 App 一样全屏运行、可离线。
-
-> 局域网内让手机访问：`npm run dev` 已开启 `--host`，手机浏览器打开终端里显示的 `Network` 地址即可。
-
-### 方式二：套壳成原生安装包（后续进阶）
-
-核心 UI 代码完全复用，只需加壳：
-
-**桌面（Windows / Ubuntu）—— Tauri**
 ```bash
-# 前置：安装 Rust，Windows 需 WebView2（Win11 自带），Ubuntu 需 webkit2gtk
-npm i -D @tauri-apps/cli
-npx tauri init      # 前端产物目录填 ../dist，开发地址填 http://localhost:5173
-npx tauri build     # 产出 .msi/.exe 与 .deb/.AppImage
+npm install
+npm run web          # = 构建 + 启动服务器，默认 http://localhost:8080
 ```
 
-**Android —— Capacitor**
+也可分开执行：
+
+```bash
+npm run build        # 构建到 dist/
+npm run serve        # 托管 dist/，默认 8080
+PORT=9000 npm run serve      # 换端口
+HOST=127.0.0.1 npm run serve # 只允许本机访问
+```
+
+启动后终端会列出可访问地址：
+
+- **本机**：`http://localhost:8080/`
+- **局域网**（手机同一 WiFi 可直接打开）：`http://192.168.x.x:8080/`
+
+> 注意：只有 `localhost` 属于浏览器认可的「安全上下文」，Service Worker 才会生效，可**安装为 PWA 并离线使用**。
+> 用局域网 IP 访问时 SW 不会注册 —— **功能完全正常，只是没有离线与安装能力**。
+
+### 方式二：安装成 PWA
+
+在 Chrome / Edge 打开上面的地址：
+
+- **Windows / Ubuntu**：地址栏右侧「安装」图标 → 变成独立桌面应用，可离线。
+- **Android**：菜单「添加到主屏幕」→ 全屏运行，可离线。
+
+### 方式三：桌面原生程序（Electron）
+
+`electron/main.cjs` 为主进程，生产环境用内置的本地静态服务器托管 `dist/`，
+让渲染进程处于正常的 `http://127.0.0.1` 源，与网页版的网络 / CORS 行为完全一致。
+
+```bash
+npm run dist:win             # Windows 便携包 → release/KnowPath-0.1.0-win-x64.zip
+npm run dist:win:installer   # Windows NSIS 安装包（需在 Windows 上执行）
+npm run electron:dev         # 本地调试桌面端（需先 npm run dev）
+```
+
+### 方式四：Android（Capacitor，后续进阶）
+
 ```bash
 # 前置：安装 Android Studio / SDK
 npm i -D @capacitor/cli @capacitor/core @capacitor/android
@@ -101,8 +150,9 @@ PWA 部分为手写实现（`public/sw.js` + `public/manifest.webmanifest`），
 ```
 electron/
   main.cjs          # 桌面主进程（窗口、单实例、外链外开）
-  static-server.cjs # 本地静态服务器（可独立测试，含防目录穿越与 SPA 回退）
+  static-server.cjs # 静态服务器（可独立测试，含防目录穿越与 SPA 回退）
 scripts/
+  serve.cjs         # 自建部署入口：托管 dist/，默认 0.0.0.0:8080
   gen-icons.mjs     # 离线生成 PWA 图标与 Windows .ico（无第三方依赖）
 src/
   components/      # UI：侧栏 / 知识库 / 图谱 / 对话 / 设置

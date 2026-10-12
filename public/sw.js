@@ -1,6 +1,12 @@
-/* 知径 KnowPath 离线缓存 Service Worker（无构建期依赖） */
-const CACHE = 'knowpath-v1';
-const PRECACHE = ['/', '/index.html', '/manifest.webmanifest', '/favicon.svg', '/pwa-192.png', '/pwa-512.png'];
+/* 知径 KnowPath 离线缓存 Service Worker（无构建期依赖）
+ * 全部路径基于自身作用域计算，因此根路径部署与子路径部署都能工作。
+ */
+const SCOPE = self.registration.scope;
+const CACHE = 'knowpath-v2';
+
+const toUrl = (p) => new URL(p, SCOPE).toString();
+const INDEX = toUrl('index.html');
+const PRECACHE = ['index.html', 'manifest.webmanifest', 'favicon.svg', 'pwa-192.png', 'pwa-512.png'].map(toUrl);
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -35,10 +41,10 @@ self.addEventListener('fetch', (event) => {
       fetch(request)
         .then((res) => {
           const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put('/index.html', copy)).catch(() => {});
+          caches.open(CACHE).then((c) => c.put(INDEX, copy)).catch(() => {});
           return res;
         })
-        .catch(() => caches.match('/index.html')),
+        .catch(() => caches.match(INDEX)),
     );
     return;
   }
@@ -50,7 +56,9 @@ self.addEventListener('fetch', (event) => {
         cached ||
         fetch(request)
           .then((res) => {
-            if (res && res.status === 200 && res.type === 'basic') {
+            // 注意：Vite 会给 script/link 加 crossorigin，这类请求是 CORS 模式，
+            // 响应 type 为 'cors' 而不是 'basic'，两者都要缓存。
+            if (res && res.ok && res.type !== 'opaque') {
               const copy = res.clone();
               caches.open(CACHE).then((c) => c.put(request, copy)).catch(() => {});
             }

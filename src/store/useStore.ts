@@ -36,10 +36,13 @@ interface State {
   streaming: StreamingState | null;
   busy: string | null;
   error: string | null;
+  /** 非致命提醒（如输出被截断、已自动重试），用黄色提示条展示 */
+  notice: string | null;
 
   init: () => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
   setError: (e: string | null) => void;
+  setNotice: (n: string | null) => void;
 
   createKb: (name: string, docs?: Doc[]) => Promise<string>;
   deleteKb: (id: string) => Promise<void>;
@@ -121,6 +124,7 @@ export const useStore = create<State>((set, get) => ({
   streaming: null,
   busy: null,
   error: null,
+  notice: null,
 
   init: async () => {
     const [settings, kbs, activeKbId] = await Promise.all([
@@ -144,6 +148,8 @@ export const useStore = create<State>((set, get) => ({
   },
 
   setError: (error) => set({ error }),
+
+  setNotice: (notice) => set({ notice }),
 
   createKb: async (name, docs = []) => {
     const kb: KnowledgeBase = {
@@ -320,7 +326,7 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
       set({ error: '请先往知识库里添加内容，再生成主线' });
       return;
     }
-    set({ busy: 'mainline', error: null });
+    set({ busy: 'mainline', error: null, notice: null });
     abort = new AbortController();
     try {
       const result = await ai.generateMainline(settings, kb, abort.signal);
@@ -336,6 +342,8 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
         activeNodeId: nodes[0]?.id ?? null,
         view: 'graph',
         busy: null,
+        // 只生成了很少的知识点 / 输出曾被截断 → 明确告诉用户，而不是静默接受
+        notice: result.warning ?? null,
       });
     } catch (e) {
       if ((e as Error).name !== 'AbortError') set({ error: (e as Error).message, busy: null });
@@ -351,12 +359,10 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
     set({ busy: `explain:${nodeId}`, error: null, streaming: { nodeId, content: '', kind: 'explain' } });
     abort = new AbortController();
     try {
-      const text = await ai.chatStream(
+      const mainline = nodes.filter((n) => n.kind === 'main').sort((a, b) => a.order - b.order);
+      const { content: text, truncated } = await ai.chatStream(
         settings,
-        [
-          { role: 'system', content: '你是一位从零讲起的私人导师，中文回答，Markdown 排版。' },
-          { role: 'user', content: `请从零完整讲解知识点：${node.title}。说明：${node.summary}。要求包含核心结论、前置概念、类比与例子、常见误区、一个自检问题，共 300~700 字。` },
-        ],
+        ai.explainMessages(settings, kb, node, mainline),
         (delta) => set({ streaming: { nodeId, content: (get().streaming?.content ?? '') + delta, kind: 'explain' } }),
         abort.signal,
       );
@@ -365,6 +371,7 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
         nodes: s.nodes.map((n) => (n.id === nodeId ? { ...n, content: text } : n)),
         streaming: null,
         busy: null,
+        notice: truncated ? '讲解被输出长度上限截断，可在「设置」里调大最大 token 后重新讲解' : null,
       }));
     } catch (e) {
       if ((e as Error).name !== 'AbortError') set({ error: (e as Error).message });
@@ -486,7 +493,7 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
 
     abort = new AbortController();
     try {
-      const full = await ai.chatStream(
+      const { content: full, truncated } = await ai.chatStream(
         settings,
         payload,
         (delta) => set({ streaming: { nodeId, content: (get().streaming?.content ?? '') + delta, kind: 'chat' } }),
@@ -501,7 +508,11 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
         createdAt: now(),
       };
       await db.messages.add(aiMsg);
-      set((s) => ({ messages: [...s.messages, aiMsg], streaming: null }));
+      set((s) => ({
+        messages: [...s.messages, aiMsg],
+        streaming: null,
+        notice: truncated ? '回答被输出长度上限截断（可在「设置」里调大最大 token，或回复「继续」让我接着写）' : null,
+      }));
     } catch (e) {
       if ((e as Error).name !== 'AbortError') set({ error: (e as Error).message });
       set({ streaming: null });

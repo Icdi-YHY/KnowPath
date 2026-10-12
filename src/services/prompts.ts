@@ -60,6 +60,11 @@ ${buildKbContext(kb, maxChars)}
 }`;
 }
 
+/** 知识点讲解的系统提示（只要导师人设，材料走 user 消息） */
+export function explainSystem(): string {
+  return TUTOR_PERSONA;
+}
+
 /** 单个知识点讲解的提示 */
 export function explainUser(kb: KnowledgeBase, node: ThreadNode, maxChars: number): string {
   return `知识材料：
