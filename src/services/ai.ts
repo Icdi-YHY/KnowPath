@@ -559,7 +559,7 @@ export function buildChatMessages(
 }
 
 /** 归一化标题，用于容错匹配：去掉空白、开头的序号和标点，统一小写 */
-function normTitle(s: string): string {
+export function normTitle(s: string): string {
   return s
     .replace(/\s+/g, '')
     .replace(/^[\d.、,，:：\-—]+/, '')

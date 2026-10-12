@@ -180,6 +180,58 @@ function mergeLayout(nodes: ThreadNode[]): ThreadNode[] {
   });
 }
 
+/**
+ * 重新生成主线时保住用户已有的劳动成果。
+ *
+ * 只替换主线节点，支线与资料节点**原样保留**（id 不变）：
+ *  - 归属是旧主线节点 → 按「标题相同」重挂到新主线；
+ *    新主线里找不到同名知识点时，挂到新主线的第一个节点，绝不静默丢弃
+ *  - 归属是别的保留节点（嵌套支线）→ 直接沿用
+ * 跨线关联同样按这个规则改指到新节点，两端都还在才保留。
+ */
+function reattachUserNodes(
+  newMain: ThreadNode[],
+  oldNodes: ThreadNode[],
+): {
+  kept: ThreadNode[];
+  remapForLink: (id: string) => string | null;
+  /** 原归属知识点在新主线里已不存在、只能挂到开头的支线数 */
+  orphaned: number;
+} {
+  const oldById = new Map(oldNodes.map((n) => [n.id, n]));
+  const byTitle = new Map<string, ThreadNode>();
+  for (const n of newMain) {
+    const k = ai.normTitle(n.title);
+    if (k && !byTitle.has(k)) byTitle.set(k, n);
+  }
+  const fallback = newMain[0]?.id ?? null;
+
+  /**
+   * 关联线端点：支线/资料保留原 id；主线节点在新主线里找不到同名就返回 null
+   * —— 关联的那个知识点已经不存在了，这条线也就失去意义，应当丢弃而不是乱指一个
+   */
+  const remapForLink = (id: string): string | null => {
+    const old = oldById.get(id);
+    if (!old) return null;
+    if (old.kind !== 'main') return id;
+    return byTitle.get(ai.normTitle(old.title))?.id ?? null;
+  };
+
+  let orphaned = 0;
+  const kept = oldNodes
+    .filter((n) => n.kind !== 'main')
+    .map((n) => {
+      // 主线换了，位置需要重新排，所以清掉 pinned
+      if (!n.parentId) return { ...n, parentId: fallback, pinned: false };
+      const oldParent = oldById.get(n.parentId);
+      if (oldParent?.kind === 'main' && !byTitle.has(ai.normTitle(oldParent.title))) orphaned += 1;
+      // 支线本身绝不能丢，找不到原归属就挂到新主线开头
+      return { ...n, parentId: remapForLink(n.parentId) ?? fallback, pinned: false };
+    });
+
+  return { kept, remapForLink, orphaned };
+}
+
 export const useStore = create<State>((set, get) => ({
   ready: false,
   settings: DEFAULT_SETTINGS,
@@ -549,7 +601,7 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
   },
 
   generateMainline: async () => {
-    const { activeKbId, kbs, settings } = get();
+    const { activeKbId, kbs, settings, nodes: oldNodes, crossLinks: oldLinks } = get();
     const kb = kbs.find((k) => k.id === activeKbId);
     if (!kb) return false;
     if (!kb.docs.length) {
@@ -560,20 +612,56 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
     abort = new AbortController();
     try {
       const result = await ai.generateMainline(settings, kb, abort.signal);
+
+      const generated = flattenMainline(kb.id, result.nodes);
+      // 主线整体替换，但支线 / 资料节点 / 跨线关联必须保住（否则重新生成等于清空劳动成果）
+      const { kept, remapForLink, orphaned } = reattachUserNodes(generated, oldNodes);
+      const all = [...generated, ...kept];
+
+      const ids = new Set(all.map((n) => n.id));
+      const parentOf = new Map(all.map((n) => [n.id, n.parentId]));
+      let dropped = 0;
+      const links = oldLinks
+        .map((l) => {
+          const sourceId = remapForLink(l.sourceId);
+          const targetId = remapForLink(l.targetId);
+          if (!sourceId || !targetId || !ids.has(sourceId) || !ids.has(targetId)) {
+            dropped += 1;
+            return null;
+          }
+          if (sourceId === targetId) return null;
+          // 与结构线（父 → 子）完全重复的虚线纯属冗余，去掉
+          if (parentOf.get(sourceId) === targetId || parentOf.get(targetId) === sourceId) {
+            dropped += 1;
+            return null;
+          }
+          return { ...l, sourceId, targetId };
+        })
+        .filter((l): l is CrossLink => l !== null);
+
       await db.nodes.where('kbId').equals(kb.id).delete();
       await db.crossLinks.where('kbId').equals(kb.id).delete();
-      const nodes = flattenMainline(kb.id, result.nodes);
-      await db.nodes.bulkAdd(nodes);
-      const laid = layoutGraph(nodes).nodes;
-      await Promise.all(laid.map((n) => db.nodes.update(n.id, { x: n.x, y: n.y })));
+      await db.nodes.bulkAdd(all);
+      if (links.length) await db.crossLinks.bulkAdd(links);
+
+      const laid = mergeLayout(all);
+      await Promise.all(laid.map((n) => db.nodes.update(n.id, { x: n.x, y: n.y, pinned: false })));
+
+      const notes = [
+        // 只生成了很少的知识点 / 输出曾被截断 → 明确告诉用户，而不是静默接受
+        result.warning,
+        kept.length ? `已保留 ${kept.length} 个支线/资料节点、${links.length} 条关联线` : null,
+        dropped ? `${dropped} 条关联线因目标知识点已不存在而被移除` : null,
+        orphaned ? `其中 ${orphaned} 条支线的原知识点在新主线里已不存在，已改挂在开头` : null,
+      ].filter(Boolean) as string[];
+
       set({
         nodes: laid,
-        crossLinks: [],
-        activeNodeId: nodes[0]?.id ?? null,
+        crossLinks: links,
+        activeNodeId: generated[0]?.id ?? null,
         view: 'graph',
         busy: null,
-        // 只生成了很少的知识点 / 输出曾被截断 → 明确告诉用户，而不是静默接受
-        notice: result.warning ?? null,
+        notice: notes.length ? notes.join('；') : null,
       });
       return true;
     } catch (e) {
@@ -591,7 +679,8 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
     set({ busy: `explain:${nodeId}`, error: null, streaming: { nodeId, content: '', kind: 'explain' } });
     abort = new AbortController();
     try {
-      const mainline = nodes.filter((n) => n.kind === 'main').sort((a, b) => a.order - b.order);
+      // 必须是前序顺序，否则 AI 看到的「第 N 个知识点」和界面对不上
+      const mainline = orderedMainline(nodes);
       const { content: text, truncated } = await ai.chatStream(
         settings,
         ai.explainMessages(settings, kb, node, mainline),
@@ -824,6 +913,3 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
     }
   },
 }));
-
-export const selectMainline = (nodes: ThreadNode[]) =>
-  nodes.filter((n) => n.kind === 'main').sort((a, b) => a.order - b.order);

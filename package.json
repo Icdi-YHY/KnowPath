@@ -14,6 +14,8 @@
     "web": "npm run build && node scripts/serve.cjs",
     "typecheck": "tsc -b --noEmit",
     "icons": "node scripts/gen-icons.mjs",
+    "test:mock": "node tests/mock-ai.cjs",
+    "test:e2e": "node tests/e2e.cjs",
     "electron:dev": "electron .",
     "dist:win": "npm run icons && npm run build && electron-builder --win --x64",
     "dist:win:installer": "npm run icons && npm run build && electron-builder --win nsis --x64"
