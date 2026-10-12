@@ -1,0 +1,137 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  @apply bg-ink-950 text-ink-100 font-sans antialiased;
+  overflow: hidden;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #27354f;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a4a68;
+  background-clip: padding-box;
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium
+      transition-colors disabled:opacity-40 disabled:cursor-not-allowed select-none;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-500 active:bg-brand-600;
+  }
+  .btn-ghost {
+    @apply btn bg-ink-800 text-ink-200 hover:bg-ink-700 border border-ink-700;
+  }
+  .btn-danger {
+    @apply btn bg-transparent text-red-300 hover:bg-red-500/10 border border-red-500/30;
+  }
+  .input {
+    @apply w-full rounded-lg bg-ink-900 border border-ink-700 px-3 py-2 text-sm text-ink-100
+      placeholder:text-ink-400 outline-none focus:border-brand-500 transition-colors;
+  }
+  .card {
+    @apply rounded-xl bg-ink-850 border border-ink-700/70;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium;
+  }
+}
+
+/* Markdown 排版 */
+.md {
+  @apply text-[14.5px] leading-7 text-ink-100;
+}
+.md > *:first-child {
+  margin-top: 0;
+}
+.md h1 {
+  @apply text-xl font-bold mt-5 mb-2.5 text-white;
+}
+.md h2 {
+  @apply text-lg font-semibold mt-5 mb-2 text-white;
+}
+.md h3 {
+  @apply text-base font-semibold mt-4 mb-2 text-ink-100;
+}
+.md p {
+  @apply my-2.5;
+}
+.md ul {
+  @apply list-disc pl-5 my-2.5 space-y-1;
+}
+.md ol {
+  @apply list-decimal pl-5 my-2.5 space-y-1;
+}
+.md li {
+  @apply leading-7;
+}
+.md code {
+  @apply rounded bg-ink-800 px-1.5 py-0.5 text-[13px] text-brand-400 font-mono;
+}
+.md pre {
+  @apply bg-ink-950 border border-ink-700 rounded-lg p-3 my-3 overflow-x-auto;
+}
+.md pre code {
+  @apply bg-transparent p-0 text-ink-100 text-[13px];
+}
+.md blockquote {
+  @apply border-l-2 border-brand-500/60 pl-3 my-3 text-ink-300;
+}
+.md a {
+  @apply text-brand-400 underline underline-offset-2;
+}
+.md table {
+  @apply w-full my-3 text-sm border-collapse;
+}
+.md th,
+.md td {
+  @apply border border-ink-700 px-2.5 py-1.5 text-left;
+}
+.md th {
+  @apply bg-ink-800 font-semibold;
+}
+.md hr {
+  @apply border-ink-700 my-4;
+}
+
+/* React Flow 深色适配 */
+.react-flow__attribution {
+  display: none;
+}
+.react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+}
+.react-flow__edge-path {
+  stroke-linecap: round;
+}
