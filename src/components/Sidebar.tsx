@@ -10,7 +10,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { KIND_RANK, mainlineNumbers } from '@/services/layout';
+import { mainlineNumbers } from '@/services/layout';
 import { useStore } from '@/store/useStore';
 import type { ThreadNode } from '@/types';
 import { StatusDot } from './ui';
@@ -37,16 +37,33 @@ export function Sidebar({
   const mains = nodes.filter((n) => n.kind === 'main');
   const numbers = useMemo(() => mainlineNumbers(nodes), [nodes]);
 
+  /**
+   * 侧栏是「阅读顺序列表」，不是空间布局，所以缩进规则和画布上不一样：
+   *  - 支线：紧跟所属节点，缩进一级
+   *  - 主线：只有当父节点真的分叉（有多个主线子节点）时才缩进一级；
+   *          单子链保持同级 —— 否则线性主线会逐级缩进到看不下去，
+   *          而且会把支线挤到整条链的末尾
+   */
+  const kindRank = (k: ThreadNode['kind']) => (k === 'branch' ? 0 : k === 'main' ? 1 : 2);
+
   const renderTree = (parentId: string | null, depth: number) => {
     const children = nodes
       .filter((n) => (n.parentId ?? null) === parentId)
       .sort((a, b) => {
-        if (a.kind !== b.kind) return KIND_RANK[a.kind] - KIND_RANK[b.kind];
+        const ra = kindRank(a.kind);
+        const rb = kindRank(b.kind);
+        if (ra !== rb) return ra - rb;
         return a.kind === 'main' ? a.order - b.order : a.createdAt - b.createdAt;
       });
+
+    const mainChildCount = children.filter((c) => c.kind === 'main').length;
+
     return children.map((n) => {
       const kids = nodes.filter((c) => c.parentId === n.id);
       const isOpen = expanded[n.id] ?? true;
+      // 注意：这是「该节点自己」的缩进层级，不是给子节点用的。
+      // 支线固定缩进一级；主线只有当父节点真的分叉（≥2 个主线子节点）时才缩进。
+      const ownDepth = n.kind === 'branch' ? depth + 1 : mainChildCount > 1 ? depth + 1 : depth;
       return (
         <div key={n.id}>
           <div
@@ -54,7 +71,7 @@ export function Sidebar({
               'group flex items-center gap-1.5 rounded-md pr-1 py-1.5 cursor-pointer transition-colors',
               n.id === activeNodeId ? 'bg-brand-500/15' : 'hover:bg-ink-800',
             )}
-            style={{ paddingLeft: 8 + depth * 14 }}
+            style={{ paddingLeft: 8 + ownDepth * 14 }}
             onClick={() => {
               selectNode(n.id);
               if (view === 'kb') setView('graph');
@@ -90,7 +107,7 @@ export function Sidebar({
           </div>
           {/* 必须用 kids.length > 0：直接写 kids.length 时，无子节点会计算出 0，
               React 会把数字 0 当作内容渲染出来（就是那个多余的「0」） */}
-          {kids.length > 0 && isOpen && renderTree(n.id, depth + 1)}
+          {kids.length > 0 && isOpen && renderTree(n.id, ownDepth)}
         </div>
       );
     });
