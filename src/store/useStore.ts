@@ -762,7 +762,10 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
         nodes: laid,
         crossLinks: [...s.crossLinks, ...links],
         activeNodeId: branch.id,
-        view: 'chat',
+        // 保持当前视图：在图谱里开支线就留在图谱（能立刻看见新节点长出来），
+        // 在对话里开支线就留在对话（直接读新支线的讲解）。
+        // 之前强制跳到对话，用户在图谱里开的支线会"瞬间消失"，看起来像没生成。
+        view: s.view,
         busy: null,
         notice: linkMsg,
       }));

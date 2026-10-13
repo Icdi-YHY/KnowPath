@@ -133,18 +133,25 @@ export function branchUser(node: ThreadNode, question: string): string {
 }`;
 }
 
-/** 跨线关联分析：找出该支线与主线上其它知识点的联系 */
+/**
+ * 跨线关联分析：找出该支线与主线上其它知识点的联系。
+ *
+ * 注意这里只要求模型「尽量找全」，不要求它排除归属知识点 ——
+ * 排除归属节点的活交给代码做（suggestCrossLinks 里会过滤掉）。
+ * 之前把「不要关联归属节点」写进提示词，模型在只想到归属节点时会直接返回空数组，
+ * 结果就是虚线永远画不出来。
+ */
 export function crossLinkSystem(): string {
-  return `你是一个知识关联分析器。给定一条支线的内容，以及主线上所有知识点的标题与说明，找出这条支线与主线上的哪些**其它**知识点存在实质性的知识关联。
+  return `你是一个知识关联分析器。给定一条支线的内容，以及主线上所有知识点的标题与说明，找出这条支线与主线上的哪些知识点存在**实质性的知识关联**。
 
-重点考虑这三类关联：
+符合任意一条就算相关：
 - 概念互通：两者讲的是同一类东西的不同侧面
 - 前置依赖：不先理解对方，就很难理解这条支线
-- 实际应用：这条支线的知识被用在那里的场景中
+- 实际应用：这条支线的知识会被用在那个知识点的场景里
+- 延伸深入：那个知识点是这条支线的自然延续或深化
 
-注意：
-- 支线已经挂在「它的归属知识点」下面了，**不要再关联归属知识点本身**（列表里已标注出来）。
-- 宁缺毋滥，只保留真正相关的（最多 3 个）。确实一个都没有，就返回空数组。
+请把**确实存在**的关联尽量列全（按相关度从高到低，最多 3 个）。
+只有在这条支线与主线上的任何知识点都确实无关时，才返回空数组。
 
 只输出**一个 JSON 对象**（第一个字符是 {，最后一个是 }），不要代码围栏，不要解释文字。`;
 }
@@ -152,10 +159,9 @@ export function crossLinkSystem(): string {
 export function crossLinkUser(
   source: { title: string; summary: string; content: string },
   mainline: ThreadNode[],
-  parentTitle?: string,
 ): string {
   const list = mainline
-    .map((n, i) => `${i}｜${n.title}｜${n.summary}${n.title === parentTitle ? '｜【该支线的归属知识点，无需关联】' : ''}`)
+    .map((n, i) => `${i}｜${n.title}｜${n.summary}`)
     .join('\n');
   return `支线内容：
 标题：${source.title}

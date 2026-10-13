@@ -583,7 +583,7 @@ export async function suggestCrossLinks(
   }>(
     settings,
     crossLinkSystem(),
-    crossLinkUser({ title: node.title, summary: node.summary, content: node.content }, mainline, parentTitle),
+    crossLinkUser({ title: node.title, summary: node.summary, content: node.content }, mainline),
     '请只输出 {"links":[{"index":数字,"title":"标题","reason":"原因"}]}，links 最多 3 项。',
     signal,
   );

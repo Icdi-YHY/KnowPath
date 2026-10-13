@@ -398,6 +398,30 @@ async function run() {
   await sleep(1300);
   check('状态切到「学习中」', await page.evaluate(() => document.body.innerText.includes('学习中')));
 
+  /* ---------------- S17 从图谱开支线：视图不跳转、节点与连线都增加 ---------------- */
+  console.log('\n[S17] 从图谱里开支线');
+  await gotoView(page, '图谱');
+  await sleep(2500);
+  const beforeBranch = await dbState(page);
+  const beforeDom = await dom(page);
+  await page.locator('.react-flow__node').first().click();
+  await sleep(1300);
+  await page.getByRole('button', { name: '这里我不懂' }).click();
+  await sleep(700);
+  await page.getByPlaceholder('例如：为什么 HTTP 是无状态的？').fill('图谱里开支线测试');
+  await page.locator('input[placeholder="例如：为什么 HTTP 是无状态的？"] + button').click();
+  await sleep(9000);
+  const afterBranch = await dbState(page);
+  d = await dom(page);
+  check(
+    '支线数量 +1',
+    afterBranch.nodes.filter((n) => n.kind === 'branch').length ===
+      beforeBranch.nodes.filter((n) => n.kind === 'branch').length + 1,
+    `${beforeBranch.nodes.filter((n) => n.kind === 'branch').length} → ${afterBranch.nodes.filter((n) => n.kind === 'branch').length}`,
+  );
+  check('视图仍停在图谱（不再被强制跳到对话）', d.flowNodes > 0, JSON.stringify({ flowNodes: d.flowNodes }));
+  check('图谱连线数增加', d.edges >= beforeDom.edges + 1, `${beforeDom.edges} → ${d.edges}`);
+
   /* ---------------- S16 删除知识库 ---------------- */
   console.log('\n[S16] 删除知识库');
   const kbCount = (await dbState(page)).kbs.length;
