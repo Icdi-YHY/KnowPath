@@ -75,9 +75,11 @@ export default function App() {
         </main>
       </div>
 
-      {/* 提示条：错误（红）与提醒（黄） */}
+      {/* 提示条：错误（红）与提醒（黄）
+          位置取「底部抬高」：贴底会盖住对话输入框，贴顶会盖住右侧详情面板的表头，
+          抬到输入框上方后，三种视图里都不会压住任何可点区域 */}
       {(error || notice) && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 flex w-max max-w-[92vw] flex-col gap-2 animate-fade-in sm:max-w-lg">
+        <div className="pointer-events-none fixed bottom-20 left-1/2 z-50 flex w-max max-w-[92vw] -translate-x-1/2 flex-col gap-2 animate-fade-in sm:max-w-lg [&>*]:pointer-events-auto">
           {error && (
             <div className="flex items-start gap-2.5 rounded-xl border border-red-500/40 bg-red-500/15 px-4 py-3 shadow-xl backdrop-blur">
               <AlertCircle size={17} className="mt-0.5 shrink-0 text-red-300" />

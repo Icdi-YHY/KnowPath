@@ -75,6 +75,8 @@ interface State {
   generateMainline: () => Promise<boolean>;
   regenerateNode: (nodeId: string) => Promise<void>;
   addBranch: (parentId: string, question: string) => Promise<void>;
+  /** 把一次对话回答直接存成支线（本地生成，不调用 AI） */
+  promoteToBranch: (parentId: string, title: string, content: string) => Promise<void>;
   deleteNode: (id: string) => Promise<void>;
 
   analyzeNewDocs: (docNames: string[]) => Promise<void>;
@@ -704,7 +706,15 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
     const { activeKbId, kbs, settings, nodes } = get();
     const kb = kbs.find((k) => k.id === activeKbId);
     const parent = nodes.find((n) => n.id === parentId);
-    if (!kb || !parent) return;
+    // 以前这里静默 return：父节点找不到时什么都不会发生，用户只看到"没反应"
+    if (!kb || !parent) {
+      set({ error: '找不到要展开的知识点，请重新选择一个节点后再试' });
+      return;
+    }
+    if (!question.trim()) {
+      set({ error: '请先描述你卡住的地方' });
+      return;
+    }
     set({ busy: `branch:${parentId}`, error: null });
     abort = new AbortController();
     try {
@@ -772,6 +782,63 @@ HTTPS 在 HTTP 之下加了 TLS 加密，保证传输的机密性与完整性。
     } catch (e) {
       if ((e as Error).name !== 'AbortError') set({ error: (e as Error).message });
       set({ busy: null });
+    }
+  },
+
+  /**
+   * 把一次对话回答直接存成支线。
+   *
+   * 这条路径**不调用 AI**：直接用「提问」当标题、回答当正文，点一下就出现在图谱里。
+   * 之所以需要它：原来开支线必须先点那个没有文字的 ✨ 小图标（而且用完就自动复位），
+   * 用户在支线里追问时拿到的只是普通对话回答，于是以为"支线不能再生支线"。
+   */
+  promoteToBranch: async (parentId, title, content) => {
+    const { activeKbId, kbs, nodes } = get();
+    const kb = kbs.find((k) => k.id === activeKbId);
+    const parent = nodes.find((n) => n.id === parentId);
+    if (!kb || !parent) {
+      set({ error: '找不到所属知识点，请重新选择一个节点后再试' });
+      return;
+    }
+    set({ error: null });
+    const clean = content.replace(/\s+/g, ' ').trim();
+    const branch = makeNode(kb.id, 0, {
+      title: title.trim().slice(0, 24) || '未命名支线',
+      summary: clean.replace(/^#+\s*/, '').slice(0, 44),
+      content: content.trim(),
+      kind: 'branch',
+      parentId,
+    });
+    await db.nodes.add(branch);
+
+    const all = [...nodes, branch];
+    const laid = mergeLayout(all);
+    await Promise.all(laid.map((n) => db.nodes.update(n.id, { x: n.x, y: n.y, pinned: false })));
+
+    set({
+      nodes: laid,
+      activeNodeId: branch.id,
+      notice: `已存为支线，挂在「${parent.title}」下面（支线下面可以继续开支线）`,
+    });
+
+    // 关联分析失败不影响支线本身，只提示一下
+    try {
+      const settings = get().settings;
+      const suggestions = await ai.suggestCrossLinks(settings, branch, orderedMainline(all));
+      const links: CrossLink[] = suggestions.map((s) => ({
+        id: nanoid(10),
+        kbId: kb.id,
+        sourceId: branch.id,
+        targetId: s.targetId,
+        reason: s.reason,
+        createdAt: now(),
+      }));
+      if (links.length) {
+        await db.crossLinks.bulkAdd(links);
+        set((s) => ({ crossLinks: [...s.crossLinks, ...links] }));
+      }
+    } catch (e) {
+      console.error('[knowpath] 存为支线后的关联分析失败：', e);
     }
   },
 

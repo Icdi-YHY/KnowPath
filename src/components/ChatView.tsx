@@ -15,6 +15,7 @@ export function ChatView() {
   const stop = useStore((s) => s.stop);
   const regenerateNode = useStore((s) => s.regenerateNode);
   const addBranch = useStore((s) => s.addBranch);
+  const promoteToBranch = useStore((s) => s.promoteToBranch);
   const setView = useStore((s) => s.setView);
   const busy = useStore((s) => s.busy);
 
@@ -129,19 +130,37 @@ export function ChatView() {
           </div>
         )}
 
-        {nodeMessages.map((m) => (
-          <div key={m.id} className={clsx('max-w-2xl mx-auto flex', m.role === 'user' ? 'justify-end' : 'justify-start')}>
-            {m.role === 'user' ? (
-              <div className="rounded-2xl rounded-br-md bg-brand-600 text-white px-3.5 py-2.5 text-sm max-w-[85%] whitespace-pre-wrap">
-                {m.content}
-              </div>
-            ) : (
-              <div className="w-full">
-                <Markdown>{m.content}</Markdown>
-              </div>
-            )}
-          </div>
-        ))}
+        {nodeMessages.map((m, i) => {
+          // 这条回答对应的提问（往前找最近的一条用户消息），存为支线时用作标题
+          const ask =
+            m.role === 'assistant'
+              ? ([...nodeMessages.slice(0, i)].reverse().find((x) => x.role === 'user')?.content ?? '')
+              : '';
+          return (
+            <div
+              key={m.id}
+              className={clsx('max-w-2xl mx-auto flex', m.role === 'user' ? 'justify-end' : 'justify-start')}
+            >
+              {m.role === 'user' ? (
+                <div className="rounded-2xl rounded-br-md bg-brand-600 text-white px-3.5 py-2.5 text-sm max-w-[85%] whitespace-pre-wrap">
+                  {m.content}
+                </div>
+              ) : (
+                <div className="w-full">
+                  <Markdown>{m.content}</Markdown>
+                  {/* 一键把这次回答变成支线：不用再去找那个小图标，也不用等 AI 再跑一遍 */}
+                  <button
+                    className="mt-2 inline-flex items-center gap-1 text-[11.5px] text-ink-400 hover:text-emerald-300 transition-colors"
+                    title="把这次回答单独存成一条支线，挂在当前知识点下面（支线下面还能继续开支线）"
+                    onClick={() => promoteToBranch(node.id, ask || node.title, m.content)}
+                  >
+                    <Sparkles size={12} /> 存为支线
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
 
         {isStreaming && (
           <div className="max-w-2xl mx-auto">
@@ -162,7 +181,7 @@ export function ChatView() {
       <div className="px-4 py-3 border-t border-ink-700/70 shrink-0">
         {branchMode && (
           <div className="mb-2 flex items-center gap-2 text-xs text-emerald-300">
-            <Sparkles size={13} /> 支线模式：描述你的疑问，将生成一条独立支线并自动连回主线
+            <Sparkles size={13} /> 支线模式：描述你的疑问，会以「{node.title.slice(0, 14)}」为父节点新建一条支线
             <button className="text-ink-400 hover:text-white ml-auto" onClick={() => setBranchMode(false)}>
               取消
             </button>
@@ -170,11 +189,16 @@ export function ChatView() {
         )}
         <div className="flex items-end gap-2">
           <button
-            className={clsx('btn !p-2.5 shrink-0', branchMode ? 'bg-emerald-500/20 text-emerald-300' : 'btn-ghost')}
-            title="开一条支线"
+            className={clsx(
+              'btn shrink-0 !py-2.5 !px-3 !text-xs',
+              branchMode ? 'bg-emerald-500/20 text-emerald-300' : 'btn-ghost',
+            )}
+            title="进入支线模式：输入的疑问会生成一条新支线"
             onClick={() => setBranchMode((v) => !v)}
           >
-            <Sparkles size={17} />
+            <Sparkles size={15} />
+            {/* 原来只有一个小图标，不好发现；现在带文字，一眼能看出这是干什么的 */}
+            {branchMode ? '支线模式' : '开支线'}
           </button>
           <textarea
             className="input resize-none max-h-40 min-h-[42px] py-2.5"

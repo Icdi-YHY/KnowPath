@@ -74,7 +74,7 @@ const dom = (page) =>
     sidebarText: [...document.querySelectorAll('div[style*=padding-left]')].map((r) =>
       r.innerText.replace(/\n/g, ' ').trim(),
     ),
-    toasts: [...document.querySelectorAll('.fixed.bottom-4 div')].map((d) => d.textContent.slice(0, 100)),
+    toasts: [...document.querySelectorAll('.fixed.z-50 div')].map((d) => d.textContent.slice(0, 100)),
   }));
 
 async function ensureSettings(page) {
@@ -108,7 +108,7 @@ async function gotoView(page, name) {
 
 async function makeBranch(page, question) {
   await gotoView(page, '对话');
-  await page.getByTitle('开一条支线').click();
+  await page.getByTitle(/进入支线模式/).click();
   await sleep(600);
   await page.getByPlaceholder('描述你卡住的地方…').fill(question);
   await page.getByTitle('发送').click();
@@ -156,7 +156,7 @@ async function run() {
   await page.getByText('1.什么是 Web 与浏览器').first().click();
   await sleep(900);
   await gotoView(page, '对话');
-  await page.getByTitle('开一条支线').click();
+  await page.getByTitle(/进入支线模式/).click();
   await sleep(500);
   await page.getByPlaceholder('描述你卡住的地方…').fill('为什么要区分请求方法？');
   await page.getByTitle('发送').click();
@@ -394,9 +394,19 @@ async function run() {
   await sleep(2200);
   await page.locator('.react-flow__node').first().click();
   await sleep(1300);
-  await page.getByRole('button', { name: '未开始' }).click();
-  await sleep(1300);
-  check('状态切到「学习中」', await page.evaluate(() => document.body.innerText.includes('学习中')));
+  const statusBtn = page.getByRole('button', { name: /^(未开始|学习中|已完成)$/ }).first();
+  if ((await statusBtn.count()) === 0) {
+    const diag = await page.evaluate(() => ({
+      panel: !!document.querySelector('div[class*="w-[420px]"]'),
+      buttons: [...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean).slice(0, 20),
+      toasts: [...document.querySelectorAll('.fixed.z-50 div')].map((d) => d.textContent.slice(0, 60)),
+    }));
+    check('节点详情面板已打开', false, JSON.stringify(diag));
+  } else {
+    await statusBtn.click();
+    await sleep(1300);
+    check('状态切到「学习中」', await page.evaluate(() => document.body.innerText.includes('学习中')));
+  }
 
   /* ---------------- S17 从图谱开支线：视图不跳转、节点与连线都增加 ---------------- */
   console.log('\n[S17] 从图谱里开支线');
@@ -421,6 +431,35 @@ async function run() {
   );
   check('视图仍停在图谱（不再被强制跳到对话）', d.flowNodes > 0, JSON.stringify({ flowNodes: d.flowNodes }));
   check('图谱连线数增加', d.edges >= beforeDom.edges + 1, `${beforeDom.edges} → ${d.edges}`);
+
+  /* ---------------- S18 一键「存为支线」（把回答直接变成子支线） ---------------- */
+  console.log('\n[S18] 一键存为支线');
+  await gotoView(page, '对话');
+  await sleep(1200);
+  const beforeSave = await dbState(page);
+  const branchBefore2 = beforeSave.nodes.filter((n) => n.kind === 'branch').length;
+  await page.getByPlaceholder('问点什么，例如：这里为什么要这样做？').fill('追问一句，用来测试存为支线');
+  await page.getByTitle('发送').click();
+  await sleep(8000);
+  const saveBtn = page.getByRole('button', { name: '存为支线' }).first();
+  check('回答下方出现「存为支线」按钮', (await saveBtn.count()) > 0);
+  if ((await saveBtn.count()) > 0) {
+    await saveBtn.click();
+    await sleep(4500);
+    const afterSave = await dbState(page);
+    check(
+      '支线数量 +1',
+      afterSave.nodes.filter((n) => n.kind === 'branch').length === branchBefore2 + 1,
+      `${branchBefore2} → ${afterSave.nodes.filter((n) => n.kind === 'branch').length}`,
+    );
+    check(
+      '新支线挂在支线下面（嵌套支线）',
+      afterSave.nodes.some(
+        (n) => n.kind === 'branch' && afterSave.nodes.some((m) => m.title === n.parent && m.kind === 'branch'),
+      ),
+      JSON.stringify(afterSave.nodes.filter((n) => n.kind === 'branch').map((n) => n.parent)),
+    );
+  }
 
   /* ---------------- S16 删除知识库 ---------------- */
   console.log('\n[S16] 删除知识库');
